@@ -29,11 +29,13 @@
   "model_type": "RandomForestClassifier",
   "params": {
     "n_estimators": 100,
+    "max_depth": 20,
+    "min_samples_leaf": 50,
     "class_weight": "balanced",
     "random_state": 42
   },
   "metrics": {
-    "accuracy_test": 0.867083349433904
+    "accuracy_test": 0.71160013910893
   },
   "n_train": 414062,
   "n_test": 103516
