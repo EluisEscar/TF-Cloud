@@ -1,4 +1,4 @@
-"""Frontend Streamlit del sistema de clasificación de calidad del aire en Almaty.
+﻿"""Frontend Streamlit del sistema de clasificación de calidad del aire en Almaty.
 
 Tabs:
 1. Predicción en tiempo real (llama a la API FastAPI).
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
@@ -24,25 +25,47 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 
+st.set_page_config(
+    page_title="Calidad del aire - Almaty",
+    page_icon="AQ",
+    layout="wide",
+)
+
 # Carga .env local si existe (no afecta a Streamlit Cloud)
 load_dotenv()
 
 
-# ─── Config ────────────────────────────────────────────────────────────────
+# Config
 
 
 def get_setting(key: str, default: str = "") -> str:
-    """Lee primero de st.secrets, luego de variables de entorno."""
+    """Lee primero de variables de entorno, luego de st.secrets."""
+    value = os.getenv(key)
+    if value:
+        return value
+
+    local_secrets = [
+        Path.home() / ".streamlit" / "secrets.toml",
+        Path.cwd() / ".streamlit" / "secrets.toml",
+    ]
+    if not any(path.exists() for path in local_secrets):
+        return default
+
     try:
         if key in st.secrets:
             return st.secrets[key]
     except (FileNotFoundError, KeyError):
         pass
-    return os.getenv(key, default)
+    return default
+
+
+def normalize_supabase_url(url: str) -> str:
+    """Supabase client expects the project URL, not the REST endpoint."""
+    return url.strip().rstrip("/").removesuffix("/rest/v1")
 
 
 API_URL = get_setting("API_URL", "http://localhost:8000").rstrip("/")
-SUPABASE_URL = get_setting("SUPABASE_URL", "")
+SUPABASE_URL = normalize_supabase_url(get_setting("SUPABASE_URL", ""))
 SUPABASE_ANON_KEY = get_setting("SUPABASE_ANON_KEY", "")
 
 
@@ -64,14 +87,9 @@ CLASS_ORDER = [
 ]
 
 
-st.set_page_config(
-    page_title="Calidad del aire — Almaty",
-    page_icon="🌫️",
-    layout="wide",
-)
 
 
-# ─── Cliente Supabase (lazy) ───────────────────────────────────────────────
+# Cliente Supabase (lazy)
 
 
 @st.cache_resource(show_spinner=False)
@@ -93,13 +111,17 @@ def fetch_recent(limit: int = 5000) -> pd.DataFrame:
     client = get_supabase_client()
     if client is None:
         return pd.DataFrame()
-    res = (
-        client.table("air_quality")
-        .select("datetime,location_id,name,lat,lon,pm25,aqi_class,aqi_label")
-        .order("datetime", desc=True)
-        .limit(limit)
-        .execute()
-    )
+    try:
+        res = (
+            client.table("air_quality")
+            .select("datetime,location_id,name,lat,lon,pm25,aqi_class,aqi_label")
+            .order("datetime", desc=True)
+            .limit(limit)
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"No se pudo consultar Supabase: {exc}")
+        return pd.DataFrame()
     df = pd.DataFrame(res.data)
     if not df.empty:
         df["datetime"] = pd.to_datetime(df["datetime"])
@@ -112,19 +134,23 @@ def fetch_stations() -> pd.DataFrame:
     client = get_supabase_client()
     if client is None:
         return pd.DataFrame()
-    res = (
-        client.table("air_quality")
-        .select("location_id,name,lat,lon")
-        .limit(50000)
-        .execute()
-    )
+    try:
+        res = (
+            client.table("air_quality")
+            .select("location_id,name,lat,lon")
+            .limit(50000)
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"No se pudo consultar estaciones en Supabase: {exc}")
+        return pd.DataFrame()
     df = pd.DataFrame(res.data)
     if df.empty:
         return df
     return df.drop_duplicates(subset=["location_id"])
 
 
-# ─── API ───────────────────────────────────────────────────────────────────
+# API
 
 
 def call_predict(payload: dict) -> dict | None:
@@ -147,21 +173,21 @@ def call_model_info() -> dict | None:
         return None
 
 
-# ─── UI ────────────────────────────────────────────────────────────────────
+# UI
 
 
-st.title("🌫️ Calidad del aire — Almaty")
+st.title("Calidad del aire - Almaty")
 st.caption(
     "Sistema de clasificación supervisada basado en Random Forest. "
     "Dataset: OpenAQ Almaty (2020-2026) · Curso Cloud Computing · USIL."
 )
 
 tab_pred, tab_hist, tab_about = st.tabs(
-    ["🔮 Predicción", "📊 Histórico", "ℹ️ Sobre el proyecto"]
+    ["Prediccion", "Historico", "Sobre el proyecto"]
 )
 
 
-# ── Tab 1: Predicción ──────────────────────────────────────────────────────
+# Tab 1: Prediccion
 
 with tab_pred:
     st.subheader("Predecir la clase de calidad del aire")
@@ -195,7 +221,7 @@ with tab_pred:
             st.markdown("**Dónde**")
             lat = st.number_input("Latitud", value=43.2520, format="%.6f")
             lon = st.number_input("Longitud", value=76.9285, format="%.6f")
-            st.caption("📍 Centro de Almaty: 43.25, 76.93")
+            st.caption("Centro de Almaty: 43.25, 76.93")
 
         submitted = st.form_submit_button("🔮 Predecir", use_container_width=True, type="primary")
 
@@ -255,14 +281,14 @@ with tab_pred:
             st.plotly_chart(fig, use_container_width=True)
 
 
-# ── Tab 2: Histórico ───────────────────────────────────────────────────────
+# Tab 2: Historico
 
 with tab_hist:
     st.subheader("Datos históricos — Almaty")
 
     if not SUPABASE_URL or not SUPABASE_ANON_KEY:
         st.warning(
-            "⚠️ Faltan credenciales de Supabase (SUPABASE_URL / SUPABASE_ANON_KEY). "
+            "Faltan credenciales de Supabase (SUPABASE_URL / SUPABASE_ANON_KEY). "
             "Configúralas en `.env` o `secrets.toml` para ver el histórico."
         )
     else:
@@ -285,7 +311,7 @@ with tab_hist:
             # Mapa de estaciones
             col_map, col_dist = st.columns([3, 2])
             with col_map:
-                st.markdown("#### 📍 Estaciones de monitoreo")
+                st.markdown("#### Estaciones de monitoreo")
                 if not stations.empty:
                     st.map(
                         stations[["lat", "lon"]].rename(columns={"lat": "latitude", "lon": "longitude"}),
@@ -336,59 +362,58 @@ with tab_hist:
                 st.dataframe(df.head(100), use_container_width=True)
 
 
-# ── Tab 3: About ───────────────────────────────────────────────────────────
+# Tab 3: Sobre el proyecto
 
 with tab_about:
     st.subheader("Sobre el proyecto")
 
     st.markdown(
         """
-        ### 🎯 Objetivo
-        MVP de un sistema de clasificación de calidad del aire en **Almaty,
-        Kazajistán**, basado en Machine Learning supervisado, desplegado en la
+        ### Objetivo
+        MVP de un sistema de clasificacion de calidad del aire en **Almaty,
+        Kazajistan**, basado en Machine Learning supervisado, desplegado en la
         nube. Trabajo final del curso de **Cloud Computing** de la **USIL**.
 
-        ### 📦 Dataset
+        ### Dataset
         - **Fuente:** [Almaty Air Quality History](https://www.kaggle.com/datasets/fichka/almaty-air-quality-history) (Kaggle)
         - **Origen:** OpenAQ (mediciones de estaciones AirNow, Clarity, AirGradient)
-        - **Tamaño:** ~545K registros · 2020-04 → 2026-01 · 146 estaciones
+        - **Tamano:** ~545K registros - 2020-04 -> 2026-01 - 146 estaciones
 
-        ### 🌫️ Variable objetivo
-        Clasificación de PM2.5 (µg/m³) en 5 clases según breakpoints EPA:
+        ### Variable objetivo
+        Clasificacion de PM2.5 (ug/m3) en 5 clases segun breakpoints EPA:
 
         | Clase | Rango | Etiqueta |
         |:----:|---|---|
-        | 0 | 0 – 12 | 🟢 Buena |
-        | 1 | 12.1 – 35.4 | 🟡 Moderada |
-        | 2 | 35.5 – 55.4 | 🟠 Dañina para grupos sensibles |
-        | 3 | 55.5 – 150.4 | 🔴 Dañina |
-        | 4 | 150.5+ | 🟣 Muy dañina |
+        | 0 | 0 - 12 | Buena |
+        | 1 | 12.1 - 35.4 | Moderada |
+        | 2 | 35.5 - 55.4 | Danina para grupos sensibles |
+        | 3 | 55.5 - 150.4 | Danina |
+        | 4 | 150.5+ | Muy danina |
 
-        ### 🏗️ Arquitectura
+        ### Arquitectura
         ```
         Kaggle CSV
-            ↓
+            ->
         EDA + limpieza (pandas en Jupyter)
-            ↓
-        Random Forest (scikit-learn) → models/rf_aqi.pkl
-            ↓
-        Supabase (PostgreSQL)            FastAPI (Render)
-            ↓                                ↓
-              ↘─── Streamlit Cloud ──────────↙
+            ->
+        Random Forest (scikit-learn) -> models/rf_aqi.pkl
+            ->
+        Supabase (PostgreSQL) <-> FastAPI (Render)
+            -> Streamlit Cloud
         ```
 
-        ### 🛠️ Stack
+        ### Stack
         - **Python 3.11**, pandas, scikit-learn
         - **FastAPI + Uvicorn** (API REST, deploy en Render)
         - **Streamlit** (frontend, deploy en Streamlit Community Cloud)
-        - **Supabase** (PostgreSQL gestionado, datos históricos)
+        - **Supabase** (PostgreSQL gestionado, datos historicos)
         - **Docker** (contenedor de la API)
         """
     )
 
     info = call_model_info()
     if info:
-        st.markdown("### 📈 Modelo en producción")
+        st.markdown("### Modelo en produccion")
         c1, c2, c3 = st.columns(3)
         c1.metric("Tipo", info["model_type"])
         c2.metric("Accuracy (test)", f"{info['metrics']['accuracy_test']:.2%}")
@@ -400,7 +425,7 @@ with tab_about:
             f"No se pudo conectar a la API en `{API_URL}` para mostrar metadata del modelo."
         )
 
-# ── Footer ─────────────────────────────────────────────────────────────────
+# Footer
 
 st.markdown("---")
 st.caption(

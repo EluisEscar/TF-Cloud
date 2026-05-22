@@ -13,7 +13,7 @@ import json
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import joblib
 import pandas as pd
@@ -85,10 +85,10 @@ class PredictionInput(BaseModel):
     Las temporales (hour, day, etc.) y lat/lon son obligatorias en la práctica
     pero se aceptan opcionales para flexibilidad."""
 
-    pm10: float | None = Field(default=None, description="PM10 (µg/m³)")
-    relativehumidity: float | None = Field(default=None, description="Humedad relativa (%)")
-    temperature: float | None = Field(default=None, description="Temperatura (°C)")
-    um003: float | None = Field(default=None, description="Conteo de partículas ≥0.3µm")
+    pm10: Optional[float] = Field(default=None, description="PM10 (µg/m³)")
+    relativehumidity: Optional[float] = Field(default=None, description="Humedad relativa (%)")
+    temperature: Optional[float] = Field(default=None, description="Temperatura (°C)")
+    um003: Optional[float] = Field(default=None, description="Conteo de partículas ≥0.3µm")
     hour: int = Field(..., ge=0, le=23, description="Hora del día (0-23, UTC)")
     day: int = Field(..., ge=1, le=31, description="Día del mes (1-31)")
     month: int = Field(..., ge=1, le=12, description="Mes (1-12)")
