@@ -113,12 +113,38 @@ Tras descomprimir, verás los CSVs dentro de `data/`. El notebook de la Fase 2 a
 python -m ipykernel install --user --name=air-quality-cloud --display-name "Python (air-quality-cloud)"
 ```
 
+## Configurar Supabase
+
+1. Crea una cuenta gratuita en [supabase.com](https://supabase.com).
+2. **New project** → ponle un nombre (p. ej. `air-quality-almaty`), elige una contraseña segura para la DB y la región más cercana (p. ej. `us-east-1`). Guarda la contraseña.
+3. Espera ~2 min a que el proyecto se aprovisione.
+4. Toma las credenciales:
+   - **Connection string (DATABASE_URL):** Settings → Database → *Connection string* → URI. Usa el modo **Transaction pooler** (puerto 6543). Reemplaza `[YOUR-PASSWORD]` por la contraseña del paso 2.
+   - **URL y anon key:** Settings → API → *Project URL* y *anon public*.
+5. Copia `.env.example` a `.env` y rellena los valores:
+   ```bash
+   cp .env.example .env     # macOS/Linux
+   copy .env.example .env   # Windows
+   ```
+6. Crea la tabla e índices y carga los datos históricos:
+   ```bash
+   # Solo la tabla, sin insertar (para verificar conexión primero):
+   python src/upload_to_supabase.py --schema-only
+
+   # Prueba con 10K filas para validar:
+   python src/upload_to_supabase.py --truncate --limit 10000
+
+   # Carga completa (~517K filas, puede tardar varios minutos):
+   python src/upload_to_supabase.py --truncate
+   ```
+7. Verifica en Supabase Studio → Table Editor que existe la tabla `air_quality` con los datos.
+
 ## Fases del proyecto
 
 - [x] **Fase 1:** Setup del entorno y estructura
-- [ ] **Fase 2:** EDA y limpieza del dataset
-- [ ] **Fase 3:** Entrenamiento del Random Forest
-- [ ] **Fase 4:** Carga de datos históricos a Supabase
+- [x] **Fase 2:** EDA y limpieza del dataset
+- [x] **Fase 3:** Entrenamiento del Random Forest
+- [x] **Fase 4:** Carga de datos históricos a Supabase
 - [ ] **Fase 5:** API REST con FastAPI + Docker
 - [ ] **Fase 6:** Frontend con Streamlit
 - [ ] **Fase 7:** Deploy en Render + Streamlit Community Cloud
