@@ -179,6 +179,28 @@ docker build -f api/Dockerfile -t aqi-api .
 docker run --rm -p 8000:8000 aqi-api
 ```
 
+## Frontend (Streamlit)
+
+App con 3 tabs: **Predicción en tiempo real**, **Histórico** (mapa, evolución, distribución desde Supabase) y **Sobre el proyecto**.
+
+### Correr localmente
+
+```bash
+# Asegúrate de tener la API corriendo en otra terminal (uvicorn api.main:app)
+pip install -r frontend/requirements.txt
+streamlit run frontend/app.py
+```
+
+Se abrirá en [http://localhost:8501](http://localhost:8501).
+
+El frontend lee la config de **dos sitios** (en este orden):
+1. `frontend/.streamlit/secrets.toml` (si existe)
+2. Variables de entorno / `.env` raíz
+
+Para desarrollo local, basta con el `.env` raíz que ya tienes (con `API_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`).
+
+Para Streamlit Community Cloud, configurarás los secrets en su UI (ver Fase 7).
+
 ## Fases del proyecto
 
 - [x] **Fase 1:** Setup del entorno y estructura
@@ -186,7 +208,7 @@ docker run --rm -p 8000:8000 aqi-api
 - [x] **Fase 3:** Entrenamiento del Random Forest
 - [x] **Fase 4:** Carga de datos históricos a Supabase
 - [x] **Fase 5:** API REST con FastAPI + Docker
-- [ ] **Fase 6:** Frontend con Streamlit
+- [x] **Fase 6:** Frontend con Streamlit
 - [ ] **Fase 7:** Deploy en Render + Streamlit Community Cloud
 
 ## Autoría
