@@ -196,8 +196,15 @@ with tab_pred:
         "se imputan con la mediana del training."
     )
 
+    now = datetime.utcnow()
+    st.caption(
+        f"Por defecto la predicción se hace para **ahora** "
+        f"(`{now.strftime('%Y-%m-%d %H:%M UTC')}`). "
+        f"Puedes simular otra fecha desplegando *Ajustar fecha/hora*."
+    )
+
     with st.form("pred_form"):
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         with col1:
             st.markdown("**Mediciones ambientales**")
             pm10 = st.number_input("PM10 (µg/m³)", value=35.0, min_value=0.0, step=1.0)
@@ -205,23 +212,33 @@ with tab_pred:
             temperature = st.number_input("Temperatura (°C)", value=5.0, step=0.5)
             um003 = st.number_input("Partículas ≥0.3µm (um003)", value=2000.0, min_value=0.0, step=100.0)
         with col2:
-            st.markdown("**Cuándo**")
-            now = datetime.utcnow()
-            hour = st.slider("Hora (UTC)", 0, 23, now.hour)
-            day = st.slider("Día del mes", 1, 31, now.day)
-            month = st.slider("Mes", 1, 12, now.month)
-            year = st.number_input("Año", value=now.year, min_value=2020, max_value=2030)
-            dayofweek = st.selectbox(
-                "Día de la semana",
-                options=list(range(7)),
-                format_func=lambda i: ["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"][i],
-                index=now.weekday(),
-            )
-        with col3:
             st.markdown("**Dónde**")
             lat = st.number_input("Latitud", value=43.2520, format="%.6f")
             lon = st.number_input("Longitud", value=76.9285, format="%.6f")
             st.caption("Centro de Almaty: 43.25, 76.93")
+
+        with st.expander("⚙️ Ajustar fecha/hora (opcional)", expanded=False):
+            st.caption(
+                "El modelo aprendió patrones estacionales y horarios. "
+                "Por defecto se usa la fecha/hora actual (UTC); modifica los "
+                "valores para simular otro momento."
+            )
+            tcol1, tcol2, tcol3 = st.columns(3)
+            with tcol1:
+                hour = st.slider("Hora (UTC)", 0, 23, now.hour)
+                dayofweek = st.selectbox(
+                    "Día de la semana",
+                    options=list(range(7)),
+                    format_func=lambda i: ["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"][i],
+                    index=now.weekday(),
+                )
+            with tcol2:
+                day = st.slider("Día del mes", 1, 31, now.day)
+                month = st.slider("Mes", 1, 12, now.month)
+            with tcol3:
+                year = st.number_input(
+                    "Año", value=now.year, min_value=2020, max_value=2030
+                )
 
         submitted = st.form_submit_button("🔮 Predecir", use_container_width=True, type="primary")
 
