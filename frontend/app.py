@@ -39,14 +39,22 @@ load_dotenv()
 
 
 def get_setting(key: str, default: str = "") -> str:
-    """Lee primero de st.secrets, luego de variables de entorno."""
+    """Lee primero de variables de entorno, luego de st.secrets si existe."""
+    value = os.getenv(key)
+    if value:
+        return value
+
+    local_secrets = [
+        Path.home() / ".streamlit" / "secrets.toml",
+        Path.cwd() / ".streamlit" / "secrets.toml",
+    ]
+    if not any(path.exists() for path in local_secrets):
+        return default
+
     try:
-        # st.secrets.get evita el warning "No secrets found" en algunas versiones
-        val = st.secrets.get(key) if hasattr(st.secrets, "get") else None
-        if val:
-            return val
-    except Exception:  # noqa: BLE001
-        # secrets.toml no existe (caso normal en local con .env) → ignorar
+        if key in st.secrets:
+            return st.secrets[key]
+    except (FileNotFoundError, KeyError):
         pass
     return default
 
