@@ -201,6 +201,133 @@ Para desarrollo local, basta con el `.env` raíz que ya tienes (con `API_URL`, `
 
 Para Streamlit Community Cloud, configurarás los secrets en su UI (ver Fase 7).
 
+## Deploy a la nube
+
+Arquitectura objetivo:
+
+```
+GitHub (este repo)
+   │
+   ├─→ Render          (Web Service · Docker · api/Dockerfile)  → API pública
+   └─→ Streamlit Cloud (frontend/app.py)                        → Frontend público
+                                │
+                                ├─ llama /predict en Render
+                                └─ consulta Supabase para histórico
+```
+
+### 1. Subir el repo a GitHub
+
+Si todavía no tienes el repo en GitHub:
+
+```bash
+# Crea un repo vacío en github.com/<tu-usuario>/TF-Cloud (sin README ni .gitignore)
+
+git remote add origin https://github.com/<tu-usuario>/TF-Cloud.git
+git branch -M main
+git push -u origin main
+```
+
+Si ya tienes remoto y solo subiste una rama de trabajo, abre PR → mergea a `main`. Render y Streamlit Cloud apuntarán a `main` por defecto.
+
+**Antes de pushear, verifica que NO subes secretos:**
+
+```bash
+git ls-files | grep -E '\.env$|secrets\.toml$|kaggle\.json$'
+# No debe devolver nada. Si devuelve algo, sácalo del index antes del push.
+```
+
+### 2. Deploy de la API en Render
+
+El `api/Dockerfile` está preparado para Render: lee `$PORT`, expone `/` como healthcheck y copia el modelo dentro de la imagen.
+
+**Opción A — Blueprint (recomendado, usa `render.yaml`):**
+
+1. Entra a [dashboard.render.com](https://dashboard.render.com) → **New** → **Blueprint**.
+2. Conecta tu cuenta de GitHub y selecciona el repo.
+3. Render detectará automáticamente `render.yaml` y propondrá crear el servicio `aqi-api`.
+4. Confirma y haz **Apply**.
+
+**Opción B — Web Service manual (sin Blueprint):**
+
+1. **New** → **Web Service** → conecta el repo.
+2. Configura:
+   | Campo | Valor |
+   |---|---|
+   | Name | `aqi-api` (o el que prefieras) |
+   | Region | la más cercana (p. ej. `Oregon`) |
+   | Branch | `main` |
+   | Runtime | **Docker** |
+   | Dockerfile Path | `api/Dockerfile` |
+   | Docker Build Context Directory | `.` (raíz del repo) |
+   | Instance Type | **Free** |
+   | Health Check Path | `/` |
+3. **Create Web Service**. El primer build tarda ~5 min (instala scikit-learn).
+4. Cuando termine, copia la URL pública. Tendrá la forma:
+   ```
+   https://aqi-api-xxxx.onrender.com
+   ```
+5. Verifica que la API responde:
+   ```bash
+   curl https://aqi-api-xxxx.onrender.com/
+   # {"status":"ok","model_loaded":true}
+
+   curl https://aqi-api-xxxx.onrender.com/docs
+   # Devuelve el HTML de Swagger UI
+   ```
+
+**Nota sobre el plan Free de Render:** la instancia se duerme tras ~15 min de inactividad. La primera petición tras dormirse tarda ~30-60 s (cold start). El frontend tiene timeout de 15 s en `requests.post`, así que la primera predicción tras un periodo de inactividad puede fallar — vuelve a intentar.
+
+### 3. Deploy del frontend en Streamlit Community Cloud
+
+1. Entra a [share.streamlit.io](https://share.streamlit.io) → **Sign in with GitHub**.
+2. **New app** → **From existing repo**.
+3. Configura:
+   | Campo | Valor |
+   |---|---|
+   | Repository | `<tu-usuario>/TF-Cloud` |
+   | Branch | `main` |
+   | Main file path | `frontend/app.py` |
+   | App URL | el subdominio que prefieras (p. ej. `aqi-almaty`) |
+4. Antes de deployar, abre **Advanced settings → Secrets** y pega:
+   ```toml
+   API_URL = "https://aqi-api-xxxx.onrender.com"
+   SUPABASE_URL = "https://<PROJECT_REF>.supabase.co"
+   SUPABASE_ANON_KEY = "eyJhbGciOi..."
+   ```
+   Streamlit Cloud guarda esto encriptado y lo expone como `st.secrets[...]`. El código del frontend ya está preparado para leer de ahí (`get_setting` en `frontend/app.py`).
+5. **Deploy**. El primer build tarda ~3 min. Cuando termine, la URL final es:
+   ```
+   https://aqi-almaty.streamlit.app
+   ```
+6. Abre la app y prueba las 3 tabs:
+   - **Predicción:** debe llamar al endpoint de Render y devolver clase + probabilidades.
+   - **Histórico:** debe consultar Supabase y pintar el mapa + serie temporal.
+   - **Sobre el proyecto:** debe mostrar la metadata del modelo desde `/model-info`.
+
+### 4. (Opcional) Restringir CORS al dominio de Streamlit
+
+En `api/main.py` el CORS está abierto (`allow_origins=["*"]`) para no bloquear el MVP. Cuando tengas la URL final del frontend, cámbialo a:
+
+```python
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://aqi-almaty.streamlit.app"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+Push a `main` → Render redeployará automáticamente (`autoDeploy: true` en `render.yaml`).
+
+### 5. Checklist final
+
+- [ ] La URL de Render responde `200` en `/` y muestra `/docs` en Swagger.
+- [ ] La URL de Streamlit carga las 3 tabs sin errores.
+- [ ] Una predicción de prueba en el frontend devuelve clase + probabilidades.
+- [ ] La tab "Histórico" muestra el mapa con estaciones reales (no vacío).
+- [ ] La tab "Sobre el proyecto" muestra accuracy y nº de features (vienen de `/model-info`).
+
 ## Fases del proyecto
 
 - [x] **Fase 1:** Setup del entorno y estructura
@@ -209,7 +336,7 @@ Para Streamlit Community Cloud, configurarás los secrets en su UI (ver Fase 7).
 - [x] **Fase 4:** Carga de datos históricos a Supabase
 - [x] **Fase 5:** API REST con FastAPI + Docker
 - [x] **Fase 6:** Frontend con Streamlit
-- [ ] **Fase 7:** Deploy en Render + Streamlit Community Cloud
+- [x] **Fase 7:** Deploy en Render + Streamlit Community Cloud
 
 ## Autoría
 

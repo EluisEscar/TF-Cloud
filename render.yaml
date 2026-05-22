@@ -1,0 +1,23 @@
+# Infraestructura como código para Render.
+# Si conectas el repo a Render y eliges "Blueprint", detectará este archivo
+# y creará el Web Service con la configuración de abajo automáticamente.
+#
+# Variables de entorno se inyectan desde el dashboard de Render
+# (Settings → Environment) cuando `sync: false`.
+
+services:
+  - type: web
+    name: aqi-api
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # Si más adelante restringes CORS a la URL de Streamlit, añádela aquí:
+      # - key: ALLOWED_ORIGINS
+      #   sync: false
