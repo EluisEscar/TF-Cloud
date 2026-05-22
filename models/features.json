@@ -1,0 +1,40 @@
+{
+  "feature_names": [
+    "pm10",
+    "relativehumidity",
+    "temperature",
+    "um003",
+    "hour",
+    "day",
+    "month",
+    "year",
+    "dayofweek",
+    "lat",
+    "lon"
+  ],
+  "target": "aqi_class",
+  "class_labels": {
+    "0": "Buena",
+    "1": "Moderada",
+    "2": "Dañina para grupos sensibles",
+    "3": "Dañina",
+    "4": "Muy dañina"
+  },
+  "medians": {
+    "pm10": 30.161374886830647,
+    "relativehumidity": 48.29583366711934,
+    "temperature": 8.345833470424015,
+    "um003": 1988.9375
+  },
+  "model_type": "RandomForestClassifier",
+  "params": {
+    "n_estimators": 100,
+    "class_weight": "balanced",
+    "random_state": 42
+  },
+  "metrics": {
+    "accuracy_test": 0.867083349433904
+  },
+  "n_train": 414062,
+  "n_test": 103516
+}
