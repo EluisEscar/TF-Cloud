@@ -27,9 +27,11 @@ data/*.zip
 data/raw/
 data/processed/
 
-# Modelos entrenados (se regeneran)
+# Modelos entrenados (los grandes se regeneran)
 *.pkl
 *.joblib
+# Excepción: sí versionamos el modelo de producción (~58 MB)
+!models/rf_aqi.pkl
 
 # Variables de entorno y secretos
 .env

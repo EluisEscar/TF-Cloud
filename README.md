@@ -139,13 +139,53 @@ python -m ipykernel install --user --name=air-quality-cloud --display-name "Pyth
    ```
 7. Verifica en Supabase Studio → Table Editor que existe la tabla `air_quality` con los datos.
 
+## API local (FastAPI)
+
+La API REST sirve predicciones del modelo entrenado.
+
+### Correr localmente sin Docker
+
+```bash
+# Desde la raíz del proyecto, con el venv activado
+pip install -r api/requirements.txt
+uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Abre [http://localhost:8000/docs](http://localhost:8000/docs) para la UI Swagger interactiva.
+
+### Endpoints
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| GET | `/` | Healthcheck |
+| GET | `/model-info` | Metadata del modelo (features, clases, métricas) |
+| POST | `/predict` | Clasifica una observación → clase + label + probabilidades |
+
+### Probar `/predict` con curl
+
+```bash
+curl -X POST http://localhost:8000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"pm10":35,"relativehumidity":70,"temperature":-5,"um003":2500,"hour":12,"day":15,"month":1,"year":2025,"dayofweek":2,"lat":43.25,"lon":76.93}'
+```
+
+### Correr con Docker
+
+```bash
+# Build (desde la raíz del proyecto, NO desde api/)
+docker build -f api/Dockerfile -t aqi-api .
+
+# Run
+docker run --rm -p 8000:8000 aqi-api
+```
+
 ## Fases del proyecto
 
 - [x] **Fase 1:** Setup del entorno y estructura
 - [x] **Fase 2:** EDA y limpieza del dataset
 - [x] **Fase 3:** Entrenamiento del Random Forest
 - [x] **Fase 4:** Carga de datos históricos a Supabase
-- [ ] **Fase 5:** API REST con FastAPI + Docker
+- [x] **Fase 5:** API REST con FastAPI + Docker
 - [ ] **Fase 6:** Frontend con Streamlit
 - [ ] **Fase 7:** Deploy en Render + Streamlit Community Cloud
 
