@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -24,7 +25,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("aqi-api")
 
-# Rutas del modelo. En el Docker image los copiamos a /app/models/.
+# Rutas del modelo local (bundleado en el Docker image como fallback).
 HERE = Path(__file__).resolve().parent
 MODEL_PATH = HERE.parent / "models" / "rf_aqi.pkl"
 FEATURES_JSON = HERE.parent / "models" / "features.json"
@@ -33,17 +34,41 @@ FEATURES_JSON = HERE.parent / "models" / "features.json"
 state: dict[str, Any] = {"model": None, "meta": None}
 
 
+def resolve_model_files() -> tuple[Path, Path]:
+    """Decide de dónde sale el modelo.
+
+    Si está definida la env var ``HF_MODEL_REPO`` (p. ej. ``usuario/aqi-rf``),
+    descarga ``rf_aqi.pkl`` y ``features.json`` de ese repo de Hugging Face
+    (entrenado en Databricks). En caso contrario usa los archivos locales
+    bundleados en la imagen. ``HF_TOKEN`` solo es necesario si el repo es privado.
+    """
+    repo = os.getenv("HF_MODEL_REPO")
+    if not repo:
+        return MODEL_PATH, FEATURES_JSON
+
+    from huggingface_hub import hf_hub_download
+
+    token = os.getenv("HF_TOKEN") or None
+    log.info("Descargando modelo desde Hugging Face: %s", repo)
+    model_path = Path(hf_hub_download(repo_id=repo, filename="rf_aqi.pkl", token=token))
+    features_path = Path(
+        hf_hub_download(repo_id=repo, filename="features.json", token=token)
+    )
+    return model_path, features_path
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Carga el modelo y la metadata al arrancar."""
-    log.info("Cargando modelo desde %s ...", MODEL_PATH)
-    if not MODEL_PATH.exists():
-        raise RuntimeError(f"No existe el modelo: {MODEL_PATH}")
-    if not FEATURES_JSON.exists():
-        raise RuntimeError(f"No existe la metadata: {FEATURES_JSON}")
+    model_path, features_path = resolve_model_files()
+    log.info("Cargando modelo desde %s ...", model_path)
+    if not model_path.exists():
+        raise RuntimeError(f"No existe el modelo: {model_path}")
+    if not features_path.exists():
+        raise RuntimeError(f"No existe la metadata: {features_path}")
 
-    state["model"] = joblib.load(MODEL_PATH)
-    with FEATURES_JSON.open(encoding="utf-8") as f:
+    state["model"] = joblib.load(model_path)
+    with features_path.open(encoding="utf-8") as f:
         state["meta"] = json.load(f)
     log.info(
         "Modelo cargado: %s | features=%d | accuracy_test=%.4f",

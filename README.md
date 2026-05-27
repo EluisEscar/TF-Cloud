@@ -328,6 +328,93 @@ Push a `main` → Render redeployará automáticamente (`autoDeploy: true` en `r
 - [ ] La tab "Histórico" muestra el mapa con estaciones reales (no vacío).
 - [ ] La tab "Sobre el proyecto" muestra accuracy y nº de features (vienen de `/model-info`).
 
+## Reentrenamiento en Databricks + Hugging Face (Fase 8)
+
+Evolución del pipeline: en lugar de entrenar el modelo en local y bundlearlo en la
+imagen Docker, el modelo se **reentrena en Databricks**, se versiona con **MLflow** y
+se publica en **Hugging Face Hub**. La API en Render lo **descarga al arrancar** si
+está definida la variable de entorno `HF_MODEL_REPO`.
+
+```
+Supabase / Volume
+   ↓  (Databricks notebook + MLflow)
+RandomForest reentrenado
+   ↓  (HfApi.upload_file)
+Hugging Face Hub (usuario/aqi-rf)
+   ↓  (hf_hub_download al arrancar)
+API en Render  →  Streamlit
+```
+
+> **Retrocompatibilidad:** si `HF_MODEL_REPO` no está definida, la API usa el
+> `models/rf_aqi.pkl` local bundleado (comportamiento de la Fase 5). Nada se rompe.
+
+El notebook está en `databricks/train_aqi.py`.
+
+### 1. Crear el token de Hugging Face
+
+1. Cuenta gratuita en [huggingface.co](https://huggingface.co).
+2. **Settings → Access Tokens → New token**, tipo **Write**. Cópialo.
+3. (Opcional) Crea el repo del modelo manualmente, o deja que el notebook lo cree
+   con `create_repo(..., exist_ok=True)`. Recomendado: **público** (el modelo no es
+   sensible y así la API lo descarga sin token).
+
+### 2. Crear el workspace de Databricks
+
+1. [databricks.com/learn/free-edition](https://www.databricks.com/learn/free-edition) → **Get started free** (no requiere tarjeta).
+2. Confirma el correo. El workspace usa **compute serverless** (no hay que crear cluster).
+
+### 3. Configurar los secrets de Databricks
+
+Con el [Databricks CLI](https://docs.databricks.com/dev-tools/cli/) autenticado:
+
+```bash
+databricks secrets create-scope aqi
+databricks secrets put-secret aqi hf_token        # pega el token Write de HF
+databricks secrets put-secret aqi database_url     # solo si entrenarás desde Supabase
+```
+
+### 4. Subir los datos y el notebook
+
+- **Datos:** Catalog → **+ Add → Upload files to a volume** → sube `data/processed.csv`.
+  Anota la ruta (p. ej. `/Volumes/workspace/default/aqi/processed.csv`).
+- **Notebook:** Workspace → **Import** → sube `databricks/train_aqi.py` (Databricks lo
+  reconoce como notebook por las cabeceras `# COMMAND ----------`).
+
+### 5. Primera corrida manual (Fase B)
+
+1. Abre el notebook, conéctalo al compute serverless.
+2. En los **widgets** de arriba:
+   - `hf_repo` → `TU_USUARIO_HF/aqi-rf`
+   - `data_source` → `volume` (la primera vez) o `supabase` (datos frescos)
+   - `volume_path` → la ruta del CSV si usas `volume`
+3. **Run all**. Al terminar, verifica en `huggingface.co/TU_USUARIO_HF/aqi-rf` que están
+   `rf_aqi.pkl` y `features.json`. En Databricks → **Experiments** verás el run de MLflow.
+
+### 6. Conectar la API de Render al modelo de HF
+
+En Render → servicio `aqi-api` → **Environment** → añade:
+
+| Key | Value |
+|---|---|
+| `HF_MODEL_REPO` | `TU_USUARIO_HF/aqi-rf` |
+| `HF_TOKEN` | *(solo si el repo es privado)* |
+
+Guarda → Render redeploya. En los logs verás `Descargando modelo desde Hugging Face: ...`.
+
+### 7. Programar el reentrenamiento (Fase C)
+
+1. Databricks → **Jobs & Pipelines → Create job**.
+2. Task: tipo **Notebook** → selecciona `train_aqi.py`.
+3. En **Parameters** fija `data_source=supabase` y `hf_repo=TU_USUARIO_HF/aqi-rf`
+   (para reentrenar con datos frescos de Supabase).
+4. **Schedule** → cron semanal, p. ej. `0 0 * * 0` (domingos 00:00 UTC).
+5. (Opcional) Para que Render tome el modelo nuevo automáticamente, crea un
+   **Deploy Hook** en Render y llámalo al final del job, o redeploya manualmente.
+
+El notebook incluye un **gate de calidad** (`MIN_ACCURACY = 0.65`): si el modelo
+reentrenado no supera ese umbral, falla el job y **no** publica en HF, protegiendo
+al modelo en producción.
+
 ## Fases del proyecto
 
 - [x] **Fase 1:** Setup del entorno y estructura
@@ -337,6 +424,7 @@ Push a `main` → Render redeployará automáticamente (`autoDeploy: true` en `r
 - [x] **Fase 5:** API REST con FastAPI + Docker
 - [x] **Fase 6:** Frontend con Streamlit
 - [x] **Fase 7:** Deploy en Render + Streamlit Community Cloud
+- [x] **Fase 8:** Reentrenamiento en Databricks + MLflow + Hugging Face Hub
 
 ## Autoría
 

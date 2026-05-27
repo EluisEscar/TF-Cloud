@@ -18,6 +18,14 @@ services:
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
+      # Repo de Hugging Face con el modelo entrenado en Databricks
+      # (formato usuario/nombre). Si lo defines, la API descarga el modelo
+      # de HF al arrancar en vez de usar el .pkl bundleado en la imagen.
+      - key: HF_MODEL_REPO
+        sync: false
+      # Solo necesario si el repo de HF es privado.
+      - key: HF_TOKEN
+        sync: false
       # Si más adelante restringes CORS a la URL de Streamlit, añádela aquí:
       # - key: ALLOWED_ORIGINS
       #   sync: false
