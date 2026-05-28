@@ -35,13 +35,32 @@ state: dict[str, Any] = {"model": None, "meta": None}
 
 
 def resolve_model_files() -> tuple[Path, Path]:
-    """Decide de dónde sale el modelo.
+    """Decide de dónde sale el modelo. Precedencia:
 
-    Si está definida la env var ``HF_MODEL_REPO`` (p. ej. ``usuario/aqi-rf``),
-    descarga ``rf_aqi.pkl`` y ``features.json`` de ese repo de Hugging Face
-    (entrenado en Databricks). En caso contrario usa los archivos locales
-    bundleados en la imagen. ``HF_TOKEN`` solo es necesario si el repo es privado.
+    1. ``S3_BUCKET`` definida → descarga de un bucket S3 (despliegue en AWS EC2).
+       ``AWS_REGION`` opcional (defecto ``us-east-1``). Las credenciales las
+       resuelve ``boto3`` automáticamente: IAM role en EC2, env vars o
+       ``~/.aws/credentials`` en local.
+    2. ``HF_MODEL_REPO`` definida → descarga del repo de Hugging Face
+       (formato ``usuario/aqi-rf``). ``HF_TOKEN`` solo si el repo es privado.
+    3. Sin env vars → usa los archivos bundleados en la imagen Docker
+       (comportamiento original de la Fase 5).
     """
+    bucket = os.getenv("S3_BUCKET")
+    if bucket:
+        import boto3
+
+        region = os.getenv("AWS_REGION", "us-east-1")
+        log.info("Descargando modelo desde S3: s3://%s (region=%s)", bucket, region)
+        s3 = boto3.client("s3", region_name=region)
+        cache_dir = Path("/tmp/aqi-model")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        model_path = cache_dir / "rf_aqi.pkl"
+        features_path = cache_dir / "features.json"
+        s3.download_file(bucket, "rf_aqi.pkl", str(model_path))
+        s3.download_file(bucket, "features.json", str(features_path))
+        return model_path, features_path
+
     repo = os.getenv("HF_MODEL_REPO")
     if not repo:
         return MODEL_PATH, FEATURES_JSON

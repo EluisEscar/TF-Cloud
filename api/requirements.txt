@@ -6,3 +6,4 @@ pandas>=2.2.3
 numpy>=1.26.4
 joblib>=1.4.2
 huggingface_hub>=0.27.0
+boto3>=1.35.0
