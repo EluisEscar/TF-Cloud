@@ -1,0 +1,12 @@
+# Dependencias para el pipeline de ML (lanzar training jobs desde tu PC).
+# Instalar con: pip install -r requirements-ml.txt
+#
+# El pin de sagemaker es importante: las versiones 2.250+ y 3.x tienen
+# bugs/breaking changes. 2.230.0 es estable y compatible con el container
+# SKLearn 1.2-1 que usamos en el training job.
+sagemaker==2.230.0
+boto3>=1.35.0
+pandas>=2.2.3
+pyarrow>=15.0.0
+requests>=2.31.0
+python-dotenv>=1.0.0
