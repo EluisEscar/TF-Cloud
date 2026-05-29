@@ -367,7 +367,7 @@ with tab_pred:
 # Tab 2: Historico
 
 with tab_hist:
-    st.subheader("Datos históricos — Almaty")
+    st.subheader("Datos históricos — Multinacional")
 
     if not SUPABASE_URL or not SUPABASE_ANON_KEY:
         st.warning(
