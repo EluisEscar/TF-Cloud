@@ -302,9 +302,12 @@ with tab_pred:
             um003 = st.number_input("Partículas ≥0.3µm (um003)", value=2000.0, min_value=0.0, step=100.0)
         with col2:
             st.markdown("**Dónde**")
-            lat = st.number_input("Latitud", value=default_lat, format="%.6f")
-            lon = st.number_input("Longitud", value=default_lon, format="%.6f")
+            st.text_input("Latitud", value=f"{default_lat:.6f}", disabled=True)
+            st.text_input("Longitud", value=f"{default_lon:.6f}", disabled=True)
             st.caption(default_loc_label)
+            # Mantenemos los valores reales para enviar al modelo
+            lat = default_lat
+            lon = default_lon
 
         with st.expander("⚙️ Ajustar fecha/hora (opcional)", expanded=False):
             st.caption(
@@ -393,10 +396,10 @@ with tab_pred:
             st.plotly_chart(fig, use_container_width=True)
 
 
-# Tab 2: Historico
+# Tab 2: Historico (Dashboard)
 
 with tab_hist:
-    st.subheader("Datos históricos — Multinacional")
+    st.subheader("Dashboard de calidad del aire")
 
     if not SUPABASE_URL or not SUPABASE_ANON_KEY:
         st.warning(
@@ -404,80 +407,203 @@ with tab_hist:
             "Configúralas en `.env` o `secrets.toml` para ver el histórico."
         )
     else:
-        with st.spinner("Consultando Supabase..."):
-            df = fetch_recent(limit=5000)
+        with st.spinner("Cargando histórico de Supabase..."):
+            df_full = fetch_recent(limit=100_000)
             stations = fetch_stations()
 
-        if df.empty:
-            st.info("La tabla `air_quality` está vacía. Carga datos con `src/upload_to_supabase.py`.")
+        if df_full.empty:
+            st.info("La tabla `air_quality` está vacía. Carga datos con `ml_pipeline/upload_to_supabase.py`.")
         else:
-            # Estadísticas resumen
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Mediciones cargadas", f"{len(df):,}")
-            c2.metric("PM2.5 promedio", f"{df['pm25'].mean():.1f} µg/m³")
-            c3.metric("PM2.5 máximo", f"{df['pm25'].max():.1f} µg/m³")
-            c4.metric("Estaciones únicas", f"{stations['location_id'].nunique()}")
-            n_countries = (
-                stations["country_code"].nunique()
-                if "country_code" in stations.columns and stations["country_code"].notna().any()
-                else 1
+            # ── Filtros ──────────────────────────────────────────────────
+            df_full["country_code"] = df_full["country_code"].fillna("?")
+            df_full["date"] = df_full["datetime"].dt.date
+            min_date, max_date = df_full["date"].min(), df_full["date"].max()
+            available_countries = sorted(df_full["country_code"].unique())
+
+            fcol1, fcol2, fcol3 = st.columns([2, 2, 2])
+            with fcol1:
+                date_range = st.date_input(
+                    "Rango de fechas",
+                    value=(min_date, max_date),
+                    min_value=min_date,
+                    max_value=max_date,
+                )
+                if isinstance(date_range, tuple) and len(date_range) == 2:
+                    start_date, end_date = date_range
+                else:
+                    start_date, end_date = min_date, max_date
+            with fcol2:
+                selected_countries = st.multiselect(
+                    "Países",
+                    options=available_countries,
+                    default=available_countries,
+                    format_func=lambda c: COUNTRY_CENTROIDS.get(c, (c, 0, 0))[0] if c in COUNTRY_CENTROIDS else c,
+                )
+            with fcol3:
+                metric_view = st.selectbox(
+                    "Granularidad temporal",
+                    options=["Diaria", "Semanal", "Por hora"],
+                    index=0,
+                    help="Cómo agregar los datos en el gráfico de tendencia.",
+                )
+
+            # Aplica filtros
+            mask = (
+                (df_full["date"] >= start_date)
+                & (df_full["date"] <= end_date)
+                & (df_full["country_code"].isin(selected_countries or available_countries))
             )
-            c5.metric("Países", f"{n_countries}")
+            df = df_full.loc[mask].copy()
+
+            if df.empty:
+                st.warning("No hay datos en el rango/países seleccionados.")
+                st.stop()
+
+            # ── KPI cards ────────────────────────────────────────────────
+            avg_pm = df["pm25"].mean()
+            peak_pm = df["pm25"].max()
+            peak_row = df.loc[df["pm25"].idxmax()]
+            dominant_class = df["aqi_label"].mode().iloc[0]
+            n_active_stations = df["location_id"].nunique()
+
+            # Color del avg según breakpoint EPA
+            if avg_pm <= 12:
+                avg_color, avg_label = "#2ecc71", "Buena"
+            elif avg_pm <= 35.4:
+                avg_color, avg_label = "#f1c40f", "Moderada"
+            elif avg_pm <= 55.4:
+                avg_color, avg_label = "#e67e22", "Sensibles"
+            elif avg_pm <= 150.4:
+                avg_color, avg_label = "#e74c3c", "Dañina"
+            else:
+                avg_color, avg_label = "#8e44ad", "Muy dañina"
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric(
+                "PM2.5 promedio",
+                f"{avg_pm:.1f} µg/m³",
+                delta=avg_label,
+                delta_color="off",
+            )
+            k2.metric(
+                "Pico de polución",
+                f"{peak_pm:.1f} µg/m³",
+                delta=f"{peak_row['country_code']} · {peak_row['datetime'].strftime('%d %b')}",
+                delta_color="off",
+            )
+            k3.metric("Clase dominante", dominant_class)
+            k4.metric("Estaciones activas", n_active_stations)
 
             st.markdown("---")
 
-            # Mapa de estaciones — zoom continental para que se vean los 9 países
+            # ── Tendencia + Heatmap ──────────────────────────────────────
+            col_trend, col_heat = st.columns([3, 2])
+
+            with col_trend:
+                st.markdown("#### Tendencia de PM2.5")
+                rule = {"Diaria": "D", "Semanal": "W", "Por hora": "h"}[metric_view]
+                trend = (
+                    df.set_index("datetime")["pm25"]
+                    .resample(rule).mean().dropna().reset_index()
+                )
+                fig_trend = px.area(
+                    trend, x="datetime", y="pm25",
+                    labels={"datetime": "Fecha", "pm25": "PM2.5 (µg/m³)"},
+                )
+                fig_trend.update_traces(line_color="#3498db", fillcolor="rgba(52,152,219,0.2)")
+                fig_trend.add_hline(y=12, line_dash="dash", line_color="#2ecc71",
+                                    annotation_text="Buena", annotation_position="right")
+                fig_trend.add_hline(y=35.4, line_dash="dash", line_color="#f1c40f",
+                                    annotation_text="Moderada", annotation_position="right")
+                fig_trend.add_hline(y=55.4, line_dash="dash", line_color="#e74c3c",
+                                    annotation_text="Dañina", annotation_position="right")
+                fig_trend.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10))
+                st.plotly_chart(fig_trend, use_container_width=True)
+
+            with col_heat:
+                st.markdown("#### Hora vs. día (PM2.5 promedio)")
+                pivot = (
+                    df.assign(hour=df["datetime"].dt.hour,
+                              dayofweek=df["datetime"].dt.dayofweek)
+                    .pivot_table(values="pm25", index="dayofweek", columns="hour", aggfunc="mean")
+                )
+                # Reindexa días para que vayan Lun→Dom
+                pivot = pivot.reindex(range(7))
+                day_labels = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+                fig_heat = px.imshow(
+                    pivot.values,
+                    labels=dict(x="Hora", y="Día", color="PM2.5"),
+                    x=list(pivot.columns),
+                    y=day_labels,
+                    color_continuous_scale=[
+                        (0.00, "#2ecc71"),  # verde
+                        (0.20, "#f1c40f"),  # amarillo
+                        (0.45, "#e67e22"),  # naranja
+                        (0.70, "#e74c3c"),  # rojo
+                        (1.00, "#8e44ad"),  # morado
+                    ],
+                    aspect="auto",
+                )
+                fig_heat.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10))
+                st.plotly_chart(fig_heat, use_container_width=True)
+
+            st.markdown("---")
+
+            # ── Mapa + Distribución ──────────────────────────────────────
             col_map, col_dist = st.columns([3, 2])
+
             with col_map:
-                st.markdown("#### Estaciones de monitoreo")
-                if not stations.empty:
+                st.markdown("#### Estaciones activas")
+                stations_filtered = stations[stations["country_code"].isin(selected_countries or available_countries)]
+                if not stations_filtered.empty:
                     st.map(
-                        stations[["lat", "lon"]].rename(columns={"lat": "latitude", "lon": "longitude"}),
+                        stations_filtered[["lat", "lon"]].rename(columns={"lat": "latitude", "lon": "longitude"}),
                         zoom=2,
                     )
                 else:
-                    st.info("Sin estaciones disponibles.")
+                    st.info("Sin estaciones en la selección.")
 
             with col_dist:
-                st.markdown("#### Distribución de clases (muestra reciente)")
+                st.markdown("#### Distribución de clases")
                 dist = (
                     df["aqi_label"].value_counts()
                     .reindex(CLASS_ORDER).fillna(0).reset_index()
                 )
                 dist.columns = ["clase", "count"]
-                fig = px.bar(
+                fig_dist = px.bar(
                     dist, x="clase", y="count",
                     color="clase",
                     color_discrete_map=CLASS_COLORS,
                 )
-                fig.update_layout(showlegend=False, height=350, xaxis_tickangle=-30)
-                st.plotly_chart(fig, use_container_width=True)
+                fig_dist.update_layout(
+                    showlegend=False, height=350,
+                    xaxis_tickangle=-30,
+                    margin=dict(l=10, r=10, t=10, b=10),
+                )
+                st.plotly_chart(fig_dist, use_container_width=True)
 
             st.markdown("---")
 
-            # Evolución temporal
-            st.markdown("#### 📈 Evolución de PM2.5")
-            df_sorted = df.sort_values("datetime")
-            # Agregamos por día para no saturar
-            daily = (
-                df_sorted.set_index("datetime")["pm25"]
-                .resample("D").mean().dropna().reset_index()
-            )
-            fig_line = px.line(
-                daily, x="datetime", y="pm25",
-                labels={"datetime": "Fecha", "pm25": "PM2.5 (µg/m³)"},
-            )
-            fig_line.add_hline(y=12, line_dash="dash", line_color="#2ecc71",
-                               annotation_text="Buena (≤12)", annotation_position="right")
-            fig_line.add_hline(y=35.4, line_dash="dash", line_color="#f39c12",
-                               annotation_text="Moderada (≤35.4)", annotation_position="right")
-            fig_line.add_hline(y=55.4, line_dash="dash", line_color="#e74c3c",
-                               annotation_text="Dañina (≤55.4)", annotation_position="right")
-            fig_line.update_layout(height=400)
-            st.plotly_chart(fig_line, use_container_width=True)
+            # ── Tabla + Export ──────────────────────────────────────────
+            st.markdown("#### Registros recientes")
+            recent = df.sort_values("datetime", ascending=False).head(100)[
+                ["datetime", "country_code", "name", "pm25", "aqi_label"]
+            ].rename(columns={
+                "datetime": "Fecha",
+                "country_code": "País",
+                "name": "Estación",
+                "pm25": "PM2.5",
+                "aqi_label": "Clase",
+            })
+            st.dataframe(recent, use_container_width=True, hide_index=True)
 
-            with st.expander("Ver datos crudos (últimas 100 filas)"):
-                st.dataframe(df.head(100), use_container_width=True)
+            csv = df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "📥 Exportar CSV (selección actual)",
+                data=csv,
+                file_name=f"aqi_export_{start_date}_{end_date}.csv",
+                mime="text/csv",
+            )
 
 
 # Tab 3: Sobre el proyecto
