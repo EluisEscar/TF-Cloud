@@ -30,6 +30,9 @@ import pandas as pd
 import requests
 from botocore import UNSIGNED
 from botocore.config import Config
+from dotenv import load_dotenv
+
+load_dotenv()  # lee .env del proyecto si existe
 
 # Lista curada de países (ISO 3166-1 alpha-2)
 COUNTRY_CODES = ["BD", "IN", "PK", "NP", "MN", "TH", "VN", "KZ", "ID", "MX"]
