@@ -10,7 +10,7 @@ Comprueba 4 cosas:
 4. Imprimimos el schema de una estación y un fragmento de mediciones reales.
 
 Requisitos:
-    pip install requests pandas pyarrow s3fs
+    pip install requests pandas pyarrow boto3
 
 Opcional pero recomendado (sube los límites de la API):
     1. Regístrate gratis en https://explore.openaq.org/account
@@ -19,13 +19,17 @@ Opcional pero recomendado (sube los límites de la API):
 """
 from __future__ import annotations
 
+import gzip
+import io
 import os
 import sys
 from datetime import datetime
 
+import boto3
 import pandas as pd
 import requests
-import s3fs
+from botocore import UNSIGNED
+from botocore.config import Config
 
 # Lista curada de países (ISO 3166-1 alpha-2)
 COUNTRY_CODES = ["BD", "IN", "PK", "NP", "MN", "TH", "VN", "KZ", "ID", "MX"]
@@ -36,6 +40,9 @@ PM25_PARAM_ID = 2  # En OpenAQ v3: pm25 = id 2
 
 API_KEY = os.getenv("OPENAQ_API_KEY", "")
 HEADERS = {"X-API-Key": API_KEY} if API_KEY else {}
+
+# Cliente S3 anónimo (OpenAQ es un dataset público de AWS Open Data)
+s3 = boto3.client("s3", config=Config(signature_version=UNSIGNED), region_name="us-east-1")
 
 
 def fetch_country_ids() -> dict[str, int]:
@@ -61,6 +68,12 @@ def list_pm25_locations(country_id: int, limit: int = 1000) -> list[dict]:
     )
     r.raise_for_status()
     return r.json()["results"]
+
+
+def s3_list_prefix(bucket: str, prefix: str, max_keys: int = 10) -> list[str]:
+    """Lista archivos bajo un prefijo. Soporta '/' como pseudo-directorio."""
+    resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=max_keys)
+    return [obj["Key"] for obj in resp.get("Contents", [])]
 
 
 def main() -> None:
@@ -120,11 +133,11 @@ def main() -> None:
 
     # ---------- 4. Acceso al S3 público ----------
     print("[4/4] Probando acceso anónimo al S3 público (openaq-data-archive) ...")
-    fs = s3fs.S3FileSystem(anon=True)
     try:
-        top_level = fs.ls(S3_BUCKET, detail=False)[:10]
-        print(f"  ✅ Conectado. Top-level del bucket:")
-        for path in top_level:
+        # En OpenAQ los archivos están bajo records/csv.gz/ — listamos lo de más alto
+        top = s3_list_prefix(S3_BUCKET, "records/csv.gz/", max_keys=5)
+        print(f"  ✅ Conectado. Primeros 5 objetos bajo records/csv.gz/:")
+        for path in top:
             print(f"     {path}")
     except Exception as e:
         print(f"  ❌ Error S3: {e}")
@@ -133,48 +146,51 @@ def main() -> None:
 
     # Intentar bajar UNA muestra de mediciones de la primera estación
     location_id = sample["id"]
-    print(f"  Buscando archivos de mediciones para location_id={location_id} ...")
+    print(f"  Buscando archivos para location_id={location_id} ...")
     candidates = [
-        f"{S3_BUCKET}/records/csv.gz/locationid={location_id}/",
-        f"{S3_BUCKET}/measurements/csv.gz/locationid={location_id}/",
-        f"{S3_BUCKET}/records/parquet/locationid={location_id}/",
+        f"records/csv.gz/locationid={location_id}/",
+        f"measurements/csv.gz/locationid={location_id}/",
+        f"records/parquet/locationid={location_id}/",
     ]
     found = None
     for prefix in candidates:
         try:
-            files = fs.ls(prefix, detail=False)
-            if files:
-                found = (prefix, files[:3])
+            keys = s3_list_prefix(S3_BUCKET, prefix, max_keys=3)
+            if keys:
+                found = (prefix, keys)
                 break
-        except FileNotFoundError:
+        except Exception:
             continue
-    if found:
-        prefix, sample_files = found
-        print(f"  ✅ Encontrado en: {prefix}")
-        for f in sample_files:
-            print(f"     {f}")
 
-        # Lee uno como sample
-        first_file = sample_files[0]
-        print(f"\n  Leyendo {first_file} para ver el schema de medidas ...")
-        try:
-            if first_file.endswith(".gz"):
-                df = pd.read_csv(f"s3://{first_file}", compression="gzip", nrows=5,
-                                 storage_options={"anon": True})
-            else:
-                df = pd.read_parquet(f"s3://{first_file}",
-                                     storage_options={"anon": True})
-                df = df.head(5)
-            print(f"  Columnas: {list(df.columns)}")
-            print(f"  Primeras filas:")
-            print(df.to_string(index=False, max_cols=8))
-        except Exception as e:
-            print(f"  ⚠️ No se pudo leer el archivo: {e}")
-    else:
-        print(f"  ⚠️ No se encontraron archivos en los prefijos probados.")
-        print(f"     Revisa la estructura del bucket manualmente:")
+    if not found:
+        print(f"  ⚠️ No se encontraron archivos en los prefijos probados:")
         for c in candidates:
-            print(f"       aws s3 ls s3://{c} --no-sign-request")
+            print(f"       s3://{S3_BUCKET}/{c}")
+        print(f"     Lista manual:")
+        print(f"       aws s3 ls s3://{S3_BUCKET}/records/csv.gz/ --no-sign-request")
+        return
+
+    prefix, sample_keys = found
+    print(f"  ✅ Encontrado en: s3://{S3_BUCKET}/{prefix}")
+    for k in sample_keys:
+        print(f"     {k}")
+
+    first_key = sample_keys[0]
+    print(f"\n  Leyendo {first_key} para ver el schema de medidas ...")
+    try:
+        obj = s3.get_object(Bucket=S3_BUCKET, Key=first_key)
+        body = obj["Body"].read()
+        if first_key.endswith(".gz"):
+            df = pd.read_csv(io.BytesIO(body), compression="gzip", nrows=5)
+        elif first_key.endswith(".parquet"):
+            df = pd.read_parquet(io.BytesIO(body)).head(5)
+        else:
+            df = pd.read_csv(io.BytesIO(body), nrows=5)
+        print(f"  Columnas: {list(df.columns)}")
+        print(f"  Primeras filas:")
+        print(df.to_string(index=False, max_cols=8))
+    except Exception as e:
+        print(f"  ⚠️ No se pudo leer el archivo: {e}")
 
     print()
     print("=" * 70)
