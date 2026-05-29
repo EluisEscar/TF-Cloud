@@ -123,22 +123,35 @@ def get_supabase_client():
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_recent(limit: int = 5000) -> pd.DataFrame:
-    """Trae las últimas N mediciones desde Supabase, ordenadas por fecha."""
+    """Trae las últimas N mediciones desde Supabase, ordenadas por fecha.
+
+    Supabase/PostgREST limita el response a 1000 filas por request, así que
+    paginamos con .range() hasta alcanzar el ``limit`` deseado.
+    """
     client = get_supabase_client()
     if client is None:
         return pd.DataFrame()
+    page_size = 1000
+    rows: list[dict] = []
     try:
-        res = (
-            client.table("air_quality")
-            .select("datetime,location_id,name,lat,lon,pm25,aqi_class,aqi_label")
-            .order("datetime", desc=True)
-            .limit(limit)
-            .execute()
-        )
+        for start in range(0, limit, page_size):
+            end = min(start + page_size - 1, limit - 1)
+            res = (
+                client.table("air_quality")
+                .select("datetime,location_id,name,lat,lon,pm25,aqi_class,aqi_label,country_code")
+                .order("datetime", desc=True)
+                .range(start, end)
+                .execute()
+            )
+            if not res.data:
+                break
+            rows.extend(res.data)
+            if len(res.data) < page_size:
+                break
     except Exception as exc:  # noqa: BLE001
         st.warning(f"No se pudo consultar Supabase: {exc}")
         return pd.DataFrame()
-    df = pd.DataFrame(res.data)
+    df = pd.DataFrame(rows)
     if not df.empty:
         df["datetime"] = pd.to_datetime(df["datetime"])
     return df
@@ -146,21 +159,36 @@ def fetch_recent(limit: int = 5000) -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_stations() -> pd.DataFrame:
-    """Devuelve las estaciones únicas con lat/lon (para el mapa)."""
+    """Devuelve las estaciones únicas con lat/lon (para el mapa).
+
+    Supabase limita a 1000 filas por request, así que paginamos hasta
+    encontrar todas las estaciones distintas (típicamente ~200 en el
+    dataset multipaís).
+    """
     client = get_supabase_client()
     if client is None:
         return pd.DataFrame()
+    page_size = 1000
+    max_rows = 100_000  # techo de seguridad
+    rows: list[dict] = []
     try:
-        res = (
-            client.table("air_quality")
-            .select("location_id,name,lat,lon")
-            .limit(50000)
-            .execute()
-        )
+        for start in range(0, max_rows, page_size):
+            end = start + page_size - 1
+            res = (
+                client.table("air_quality")
+                .select("location_id,name,lat,lon,country_code")
+                .range(start, end)
+                .execute()
+            )
+            if not res.data:
+                break
+            rows.extend(res.data)
+            if len(res.data) < page_size:
+                break
     except Exception as exc:  # noqa: BLE001
         st.warning(f"No se pudo consultar estaciones en Supabase: {exc}")
         return pd.DataFrame()
-    df = pd.DataFrame(res.data)
+    df = pd.DataFrame(rows)
     if df.empty:
         return df
     return df.drop_duplicates(subset=["location_id"])
@@ -383,22 +411,28 @@ with tab_hist:
             st.info("La tabla `air_quality` está vacía. Carga datos con `src/upload_to_supabase.py`.")
         else:
             # Estadísticas resumen
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Mediciones cargadas", f"{len(df):,}")
             c2.metric("PM2.5 promedio", f"{df['pm25'].mean():.1f} µg/m³")
             c3.metric("PM2.5 máximo", f"{df['pm25'].max():.1f} µg/m³")
             c4.metric("Estaciones únicas", f"{stations['location_id'].nunique()}")
+            n_countries = (
+                stations["country_code"].nunique()
+                if "country_code" in stations.columns and stations["country_code"].notna().any()
+                else 1
+            )
+            c5.metric("Países", f"{n_countries}")
 
             st.markdown("---")
 
-            # Mapa de estaciones
+            # Mapa de estaciones — zoom continental para que se vean los 9 países
             col_map, col_dist = st.columns([3, 2])
             with col_map:
                 st.markdown("#### Estaciones de monitoreo")
                 if not stations.empty:
                     st.map(
                         stations[["lat", "lon"]].rename(columns={"lat": "latitude", "lon": "longitude"}),
-                        zoom=10,
+                        zoom=2,
                     )
                 else:
                     st.info("Sin estaciones disponibles.")
