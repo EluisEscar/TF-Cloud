@@ -127,37 +127,55 @@ app.add_middleware(
 
 
 class PredictionInput(BaseModel):
-    """Entrada para /predict. Todas las features son opcionales:
-    si falta una numérica ambiental se imputa con la mediana del training.
-    Las temporales (hour, day, etc.) y lat/lon son obligatorias en la práctica
-    pero se aceptan opcionales para flexibilidad."""
+    """Entrada para /predict.
 
-    pm10: Optional[float] = Field(default=None, description="PM10 (µg/m³)")
+    Esquema **flexible**: acepta features de ambos modelos (Almaty original y
+    multinacional OpenAQ). El endpoint usa solo las que el modelo cargado
+    declare en ``feature_names``; el resto se ignoran. Lo que falta se imputa
+    con la mediana del training (vive en ``features.json``).
+    """
+
+    # ─── Partículas (depende del modelo: pm10 para el original, pm1 para el nuevo) ─
+    pm1: Optional[float] = Field(default=None, description="PM1 (µg/m³) — modelo multipaís")
+    pm10: Optional[float] = Field(default=None, description="PM10 (µg/m³) — modelo original")
+
+    # ─── Meteorología ─────────────────────────────────────────────────────
     relativehumidity: Optional[float] = Field(default=None, description="Humedad relativa (%)")
     temperature: Optional[float] = Field(default=None, description="Temperatura (°C)")
     um003: Optional[float] = Field(default=None, description="Conteo de partículas ≥0.3µm")
+
+    # ─── Temporales (obligatorias) ────────────────────────────────────────
     hour: int = Field(..., ge=0, le=23, description="Hora del día (0-23, UTC)")
     day: int = Field(..., ge=1, le=31, description="Día del mes (1-31)")
     month: int = Field(..., ge=1, le=12, description="Mes (1-12)")
     year: int = Field(..., ge=2020, le=2030, description="Año")
     dayofweek: int = Field(..., ge=0, le=6, description="Día de semana (0=lunes, 6=domingo)")
+
+    # ─── Geografía ────────────────────────────────────────────────────────
     lat: float = Field(..., description="Latitud de la estación")
     lon: float = Field(..., description="Longitud de la estación")
+
+    # ─── País (solo modelo multipaís) ─────────────────────────────────────
+    country_code: Optional[str] = Field(
+        default=None,
+        description="Código ISO del país (ej. 'IN', 'BD'). Solo usado por el modelo multipaís.",
+    )
 
     model_config = {
         "json_schema_extra": {
             "example": {
-                "pm10": 35.0,
-                "relativehumidity": 70.0,
-                "temperature": -5.0,
-                "um003": 2500.0,
-                "hour": 12,
+                "pm1": 30.0,
+                "relativehumidity": 65.0,
+                "temperature": 28.0,
+                "um003": 3000.0,
+                "hour": 14,
                 "day": 15,
-                "month": 1,
-                "year": 2025,
-                "dayofweek": 2,
-                "lat": 43.25,
-                "lon": 76.93,
+                "month": 3,
+                "year": 2026,
+                "dayofweek": 4,
+                "lat": 23.73,
+                "lon": 90.40,
+                "country_code": "BD",
             }
         }
     }
@@ -184,6 +202,12 @@ class ModelInfoOutput(BaseModel):
     metrics: dict[str, float]
     n_train: int
     n_test: int
+    country_encoder: Optional[dict[str, int]] = Field(
+        default=None, description="Mapping ISO code → id (solo modelo multipaís)"
+    )
+    countries: Optional[list[str]] = Field(
+        default=None, description="ISO codes de los países en el entrenamiento"
+    )
 
 
 # ─── Endpoints ─────────────────────────────────────────────────────────────
@@ -212,6 +236,8 @@ def model_info() -> ModelInfoOutput:
         metrics=meta["metrics"],
         n_train=meta["n_train"],
         n_test=meta["n_test"],
+        country_encoder=meta.get("country_encoder"),
+        countries=meta.get("countries"),
     )
 
 
@@ -223,10 +249,25 @@ def predict(payload: PredictionInput) -> PredictionOutput:
     if model is None or meta is None:
         raise HTTPException(status_code=503, detail="Modelo no cargado")
 
-    # Construye la fila en el orden exacto de features que vio el entrenamiento.
     medians: dict[str, float] = meta["medians"]
     feature_names: list[str] = meta["feature_names"]
     raw = payload.model_dump()
+
+    # Si el modelo usa country_id (modelo multipaís), traducimos country_code → id
+    # usando el encoder guardado en features.json.
+    if "country_id" in feature_names:
+        encoder = meta.get("country_encoder", {})
+        code = raw.get("country_code")
+        if code and code in encoder:
+            raw["country_id"] = encoder[code]
+        else:
+            # País desconocido → usa la primera entrada del encoder como fallback.
+            # El modelo aún puede predecir, pero será menos preciso.
+            raw["country_id"] = next(iter(encoder.values()), 0)
+            log.warning("country_code %r no está en el encoder; usando %s", code, raw["country_id"])
+
+    # Construye la fila en el orden exacto de features que vio el entrenamiento.
+    # Lo que no esté en el payload se imputa con la mediana del training.
     row = {
         name: (raw[name] if raw.get(name) is not None else medians.get(name, 0.0))
         for name in feature_names
