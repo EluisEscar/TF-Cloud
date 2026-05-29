@@ -2,11 +2,11 @@
 
 Lee credenciales/region del .env (las del IAM user aqi-local-dev), crea
 el estimador SKLearn apuntando al data bucket, y dispara el job. SageMaker
-provisiona una ml.m5.large efímera (~$0.10/h), corre sagemaker/train.py
+provisiona una ml.m5.large efímera (~$0.10/h), corre ml_pipeline/train.py
 dentro de su container, sube los artefactos a S3 y se autoapaga.
 
 Uso:
-    python sagemaker/launch_training.py
+    python ml_pipeline/launch_training.py
 
 Variables de entorno (desde .env):
     SAGEMAKER_ROLE_ARN   ARN del role aqi-sagemaker-role
@@ -59,10 +59,10 @@ log.info("  region        = %s", AWS_REGION)
 # ─── Estimator ─────────────────────────────────────────────────────────────
 # framework_version 1.2-1 corresponde a scikit-learn 1.2.1 — viene con
 # pandas + joblib + boto3 preinstalados. Si train.py necesita más, los
-# añadimos vía sagemaker/requirements.txt (se instala automáticamente).
+# añadimos vía ml_pipeline/requirements.txt (se instala automáticamente).
 sklearn_estimator = SKLearn(
     entry_point="train.py",
-    source_dir="sagemaker",
+    source_dir="ml_pipeline",
     role=ROLE_ARN,
     instance_type=INSTANCE_TYPE,
     instance_count=1,

@@ -12,9 +12,9 @@ Pipeline (corre en local; barato de iterar):
 8. Guarda como Parquet (local + opcional sube a S3).
 
 Uso:
-    python sagemaker/prepare_data.py                # corre con defaults
-    python sagemaker/prepare_data.py --months 24    # 24 meses de histórico
-    python sagemaker/prepare_data.py --upload-s3    # sube al bucket de datos
+    python ml_pipeline/prepare_data.py                # corre con defaults
+    python ml_pipeline/prepare_data.py --months 24    # 24 meses de histórico
+    python ml_pipeline/prepare_data.py --upload-s3    # sube al bucket de datos
 
 Variables de entorno:
     OPENAQ_API_KEY          (obligatoria)
