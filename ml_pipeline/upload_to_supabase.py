@@ -81,6 +81,26 @@ def prepare_df(parquet_path: Path) -> pd.DataFrame:
     if "pm25" not in df.columns:
         sys.exit("El Parquet no tiene la columna pm25 — no se puede subir.")
 
+    # Clip valores fuera de rango físicamente razonable. Sensores OpenAQ a
+    # veces reportan valores absurdos (10^7 µg/m³, temperaturas de 10000°C)
+    # cuando están dañados, y Postgres rechaza por overflow de precisión
+    # (NUMERIC(10,3) tope ~10^7). Limitamos a rangos físicos sensatos.
+    CLIPS = {
+        "pm25":             (0,    9000),   # rango EPA realista: 0-500, extremos hasta ~1500
+        "pm10":             (0,    9000),
+        "pm1":              (0,    9000),   # por si la columna está
+        "relativehumidity": (0,    100),
+        "temperature":      (-80,  80),     # min/max terrestre real
+        "um003":            (0,    1e9),    # particle count, precision 12 lo aguanta
+    }
+    n_before = len(df)
+    for col, (lo, hi) in CLIPS.items():
+        if col in df.columns:
+            n_out = ((df[col] < lo) | (df[col] > hi)).sum()
+            if n_out > 0:
+                log.info("  %s: %d valores fuera de [%s, %s] → clipped", col, n_out, lo, hi)
+                df[col] = df[col].clip(lower=lo, upper=hi)
+
     # datetime a Python datetime (psycopg2 lo serializa bien)
     df["datetime"] = pd.to_datetime(df["datetime"], utc=True).dt.tz_convert("UTC").dt.tz_localize(None)
 
