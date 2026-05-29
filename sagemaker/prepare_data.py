@@ -66,9 +66,15 @@ AQI_LABELS = {
     4: "Muy dañina",
 }
 
-# Cliente S3 anónimo (OpenAQ es AWS Open Data público)
+# Cliente S3 anónimo (OpenAQ es AWS Open Data público). Subimos el pool de
+# conexiones para que match con los workers paralelos y no veamos warnings.
 s3_public = boto3.client(
-    "s3", config=Config(signature_version=UNSIGNED), region_name="us-east-1"
+    "s3",
+    config=Config(
+        signature_version=UNSIGNED,
+        max_pool_connections=PARALLEL_WORKERS * 2,
+    ),
+    region_name="us-east-1",
 )
 
 log = logging.getLogger("prepare-data")
@@ -238,12 +244,36 @@ def pivot_to_wide(df_long: pd.DataFrame, stations_meta: list[dict]) -> pd.DataFr
     return df_wide
 
 
+# Columnas que NUNCA dropeamos por NaN (claves para el modelo o identidad)
+PROTECTED_COLS = {
+    "location_id", "datetime", "lat", "lon", "pm25",
+    "country_code", "station_name",
+}
+# Umbral: si una columna tiene >NAN_DROP_THRESHOLD de NaN, la dropeamos
+NAN_DROP_THRESHOLD = 0.70
+
+
 def add_features_and_target(df: pd.DataFrame) -> pd.DataFrame:
     """Filtra, añade aqi_class + features temporales + imputa medianas."""
     log.info("Filtrando, imputando y derivando features ...")
-    # Requiere PM2.5 y PM10 sí o sí (resto se imputa)
-    df = df.dropna(subset=["pm25", "pm10"])
+
+    # Solo PM2.5 es estrictamente necesario (es de donde sale el target).
+    # PM10 y meteorología se imputan si faltan (los relajamos para no perder países).
+    df = df.dropna(subset=["pm25"])
     df = df[df["pm25"] > 0]
+
+    # Dropea columnas con demasiados NaN (excepto las protegidas)
+    nan_ratio = df.isna().mean()
+    to_drop = [
+        c for c in df.columns
+        if c not in PROTECTED_COLS and nan_ratio.get(c, 0) > NAN_DROP_THRESHOLD
+    ]
+    if to_drop:
+        log.info(
+            "Dropeando columnas con >%d%% NaN: %s",
+            int(NAN_DROP_THRESHOLD * 100), to_drop,
+        )
+        df = df.drop(columns=to_drop)
 
     # aqi_class derivado de PM2.5 (mismos breakpoints EPA del proyecto original)
     def _classify(pm: float) -> int:
@@ -268,19 +298,21 @@ def add_features_and_target(df: pd.DataFrame) -> pd.DataFrame:
     df["year"] = dt.dt.year.astype("int16")
     df["dayofweek"] = dt.dt.dayofweek.astype("int8")
 
-    # Imputar meteorología si las columnas existen, si no crearlas vacías
-    for col in ["relativehumidity", "temperature", "um003"]:
-        if col not in df.columns:
-            df[col] = pd.NA
-
+    # Imputar numéricas restantes con la mediana global
+    numeric_cols = df.select_dtypes(include="float64").columns.tolist()
+    # No imputar PM2.5 (ya filtramos) ni lat/lon (siempre presentes)
+    impute_cols = [c for c in numeric_cols if c not in {"pm25", "lat", "lon"}]
     medians = {}
-    for col in ["relativehumidity", "temperature", "um003"]:
+    for col in impute_cols:
         med = float(df[col].median()) if df[col].notna().any() else 0.0
         medians[col] = med
         df[col] = df[col].fillna(med)
 
-    log.info("Medianas usadas para imputación: %s", medians)
+    log.info("Medianas usadas para imputación:")
+    for k, v in medians.items():
+        log.info("  %s = %.3f", k, v)
     log.info("Shape final: %s", df.shape)
+    log.info("Países en dataset final:\n%s", df["country_code"].value_counts())
     log.info("Distribución aqi_class:\n%s", df["aqi_class"].value_counts().sort_index())
     return df
 
