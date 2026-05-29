@@ -29,6 +29,7 @@ import io
 import logging
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -75,27 +76,51 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 
 # ─── 1. Estaciones por país ────────────────────────────────────────────────
+def _get_with_retry(url: str, params: dict, attempts: int = 4) -> dict:
+    """GET con retries + backoff exponencial. Tolera 5xx y 429 de OpenAQ."""
+    last_exc: Exception | None = None
+    for i in range(attempts):
+        try:
+            r = requests.get(url, params=params, headers=HEADERS, timeout=30)
+            if r.status_code >= 500 or r.status_code == 429:
+                raise requests.HTTPError(f"{r.status_code} en {url}")
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_exc = e
+            wait = 2 ** i  # 1s, 2s, 4s, 8s
+            log.warning("Reintento %d/%d en %ds: %s", i + 1, attempts, wait, e)
+            time.sleep(wait)
+    raise RuntimeError(f"Falló tras {attempts} intentos: {last_exc}")
+
+
 def fetch_country_ids() -> dict[str, int]:
-    r = requests.get(
-        f"{OPENAQ_API}/countries", params={"limit": 300}, headers=HEADERS, timeout=30
-    )
-    r.raise_for_status()
-    return {c["code"]: c["id"] for c in r.json()["results"]}
+    data = _get_with_retry(f"{OPENAQ_API}/countries", {"limit": 300})
+    return {c["code"]: c["id"] for c in data["results"]}
 
 
 def list_pm25_locations(country_id: int) -> list[dict]:
-    r = requests.get(
-        f"{OPENAQ_API}/locations",
-        params={
-            "countries_id": country_id,
-            "parameters_id": PM25_PARAM_ID,
-            "limit": 1000,
-        },
-        headers=HEADERS,
-        timeout=30,
-    )
-    r.raise_for_status()
-    return r.json()["results"]
+    """Pagina si hace falta. OpenAQ recomienda limit<=100."""
+    all_results: list[dict] = []
+    page = 1
+    page_size = 100
+    while True:
+        data = _get_with_retry(
+            f"{OPENAQ_API}/locations",
+            {
+                "countries_id": country_id,
+                "parameters_id": PM25_PARAM_ID,
+                "limit": page_size,
+                "page": page,
+            },
+        )
+        results = data.get("results", [])
+        all_results.extend(results)
+        # corta cuando ya tienes suficiente o no hay más páginas
+        if len(results) < page_size or len(all_results) >= MAX_STATIONS_PER_COUNTRY:
+            break
+        page += 1
+    return all_results
 
 
 # ─── 2. Archivos S3 por estación en ventana temporal ───────────────────────
@@ -145,7 +170,11 @@ def collect_raw(months_back: int) -> pd.DataFrame:
         if cid is None:
             log.warning("País %s no encontrado en OpenAQ", code)
             continue
-        locs = list_pm25_locations(cid)[:MAX_STATIONS_PER_COUNTRY]
+        try:
+            locs = list_pm25_locations(cid)[:MAX_STATIONS_PER_COUNTRY]
+        except Exception as e:
+            log.warning("  %s: falló listar estaciones, skip — %s", code, e)
+            continue
         for loc in locs:
             loc["_country_code"] = code
         stations_meta.extend(locs)
@@ -282,7 +311,11 @@ def main() -> None:
         cid = country_map.get(code)
         if cid is None:
             continue
-        locs = list_pm25_locations(cid)[:MAX_STATIONS_PER_COUNTRY]
+        try:
+            locs = list_pm25_locations(cid)[:MAX_STATIONS_PER_COUNTRY]
+        except Exception as e:
+            log.warning("%s: skip (no se pudo listar): %s", code, e)
+            continue
         for loc in locs:
             loc["_country_code"] = code
         stations_meta.extend(locs)
