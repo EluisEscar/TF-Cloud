@@ -1,4 +1,4 @@
-﻿"""Frontend Streamlit del sistema de clasificación de calidad del aire en Almaty.
+"""Frontend Streamlit del sistema de clasificación de calidad del aire en Almaty.
 
 Tabs:
 1. Predicción en tiempo real (llama a la API FastAPI).
@@ -87,6 +87,22 @@ CLASS_ORDER = [
 ]
 
 
+# Centroide aproximado (lat, lon) de la principal ciudad contaminada por país
+# Se usa para pre-rellenar la entrada de Predicción al elegir país en el dropdown.
+COUNTRY_CENTROIDS: dict[str, tuple[str, float, float]] = {
+    "BD": ("Dhaka, Bangladesh", 23.7300, 90.4000),
+    "ID": ("Jakarta, Indonesia", -6.2100, 106.8500),
+    "IN": ("Delhi, India", 28.6100, 77.2100),
+    "KZ": ("Almaty, Kazajistán", 43.2500, 76.9300),
+    "MN": ("Ulaanbaatar, Mongolia", 47.9100, 106.9200),
+    "MX": ("Ciudad de México, México", 19.4300, -99.1300),
+    "NP": ("Kathmandu, Nepal", 27.7100, 85.3200),
+    "PK": ("Lahore, Pakistán", 31.5500, 74.3400),
+    "TH": ("Bangkok, Tailandia", 13.7600, 100.5000),
+    "VN": ("Hanoi, Vietnam", 21.0300, 105.8300),
+}
+
+
 
 
 # Cliente Supabase (lazy)
@@ -164,6 +180,7 @@ def call_predict(payload: dict) -> dict | None:
         return None
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def call_model_info() -> dict | None:
     try:
         r = requests.get(f"{API_URL}/model-info", timeout=10)
@@ -176,10 +193,11 @@ def call_model_info() -> dict | None:
 # UI
 
 
-st.title("Calidad del aire - Almaty")
+st.title("Calidad del aire - Monitor multinacional")
 st.caption(
     "Sistema de clasificación supervisada basado en Random Forest. "
-    "Dataset: OpenAQ Almaty (2020-2026) · Curso Cloud Computing · USIL."
+    "Dataset: OpenAQ — 10 países con alta concentración de PM2.5. "
+    "Curso Cloud Computing · USIL."
 )
 
 tab_pred, tab_hist, tab_about = st.tabs(
@@ -191,10 +209,26 @@ tab_pred, tab_hist, tab_about = st.tabs(
 
 with tab_pred:
     st.subheader("Predecir la clase de calidad del aire")
-    st.write(
-        "Ingresa las condiciones ambientales y temporales. Los campos vacíos "
-        "se imputan con la mediana del training."
-    )
+
+    # El modelo en producción puede ser el original (Almaty, pm10) o el
+    # multinacional (pm1 + country_code). Adaptamos el formulario al schema
+    # real que reporta /model-info.
+    model_info = call_model_info()
+    feature_names = (model_info or {}).get("feature_names", [])
+    countries: list[str] = (model_info or {}).get("countries") or []
+    uses_pm1 = "pm1" in feature_names
+    uses_country = "country_id" in feature_names and bool(countries)
+
+    if uses_country:
+        st.write(
+            "Selecciona el país, ingresa las condiciones ambientales y "
+            "temporales. Los campos vacíos se imputan con la mediana del training."
+        )
+    else:
+        st.write(
+            "Ingresa las condiciones ambientales y temporales. Los campos vacíos "
+            "se imputan con la mediana del training."
+        )
 
     now = datetime.utcnow()
     st.caption(
@@ -203,19 +237,45 @@ with tab_pred:
         f"Puedes simular otra fecha desplegando *Ajustar fecha/hora*."
     )
 
+    # Dropdown de país FUERA del form para que cambiar país actualice lat/lon
+    # en vivo (los widgets dentro de st.form no rerendean hasta el submit).
+    selected_country = None
+    default_lat, default_lon, default_loc_label = 43.2520, 76.9285, "Centro de Almaty: 43.25, 76.93"
+    if uses_country:
+        # Filtra a los países que aparecen tanto en el modelo como en nuestro mapa.
+        options = [c for c in countries if c in COUNTRY_CENTROIDS] or countries
+        default_idx = options.index("BD") if "BD" in options else 0
+        selected_country = st.selectbox(
+            "País",
+            options=options,
+            index=default_idx,
+            format_func=lambda c: COUNTRY_CENTROIDS.get(c, (c, 0, 0))[0] if c in COUNTRY_CENTROIDS else c,
+        )
+        if selected_country in COUNTRY_CENTROIDS:
+            label, default_lat, default_lon = COUNTRY_CENTROIDS[selected_country]
+            default_loc_label = f"Centroide: {label} ({default_lat}, {default_lon})"
+
     with st.form("pred_form"):
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("**Mediciones ambientales**")
-            pm10 = st.number_input("PM10 (µg/m³)", value=35.0, min_value=0.0, step=1.0)
+            if uses_pm1:
+                pm_value = st.number_input(
+                    "PM1 (µg/m³)", value=30.0, min_value=0.0, step=1.0,
+                    help="Partículas ≤1 µm. Más finas que PM2.5 — el modelo las usa como predictor.",
+                )
+            else:
+                pm_value = st.number_input(
+                    "PM10 (µg/m³)", value=35.0, min_value=0.0, step=1.0,
+                )
             humidity = st.number_input("Humedad relativa (%)", value=60.0, min_value=0.0, max_value=100.0)
-            temperature = st.number_input("Temperatura (°C)", value=5.0, step=0.5)
+            temperature = st.number_input("Temperatura (°C)", value=25.0, step=0.5)
             um003 = st.number_input("Partículas ≥0.3µm (um003)", value=2000.0, min_value=0.0, step=100.0)
         with col2:
             st.markdown("**Dónde**")
-            lat = st.number_input("Latitud", value=43.2520, format="%.6f")
-            lon = st.number_input("Longitud", value=76.9285, format="%.6f")
-            st.caption("Centro de Almaty: 43.25, 76.93")
+            lat = st.number_input("Latitud", value=default_lat, format="%.6f")
+            lon = st.number_input("Longitud", value=default_lon, format="%.6f")
+            st.caption(default_loc_label)
 
         with st.expander("⚙️ Ajustar fecha/hora (opcional)", expanded=False):
             st.caption(
@@ -244,7 +304,6 @@ with tab_pred:
 
     if submitted:
         payload = {
-            "pm10": pm10,
             "relativehumidity": humidity,
             "temperature": temperature,
             "um003": um003,
@@ -256,6 +315,13 @@ with tab_pred:
             "lat": float(lat),
             "lon": float(lon),
         }
+        # Envía el campo de PM correcto según el modelo cargado
+        if uses_pm1:
+            payload["pm1"] = pm_value
+        else:
+            payload["pm10"] = pm_value
+        if uses_country and selected_country:
+            payload["country_code"] = selected_country
         with st.spinner("Llamando al modelo..."):
             result = call_predict(payload)
 

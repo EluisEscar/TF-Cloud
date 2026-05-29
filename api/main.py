@@ -103,14 +103,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Almaty Air Quality API",
+    title="Air Quality API — Monitor multinacional",
     description=(
-        "Clasificación supervisada del nivel de calidad del aire en Almaty "
-        "(Kazajistán) usando un Random Forest entrenado sobre 500K+ "
-        "mediciones de OpenAQ (2020-2026). Las clases siguen los breakpoints "
-        "EPA para PM2.5."
+        "Clasificación supervisada del nivel de calidad del aire en 10 países "
+        "con alta concentración de PM2.5 (Bangladesh, India, Pakistán, Nepal, "
+        "Mongolia, Tailandia, Vietnam, Kazajistán, Indonesia, México). "
+        "Random Forest entrenado en SageMaker sobre mediciones reales de OpenAQ, "
+        "expuesto desde una EC2 en AWS. Las clases siguen los breakpoints EPA "
+        "para PM2.5."
     ),
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
