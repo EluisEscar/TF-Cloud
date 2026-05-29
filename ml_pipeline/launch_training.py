@@ -21,6 +21,8 @@ import logging
 import os
 from datetime import datetime, timezone
 
+import boto3
+import sagemaker
 from dotenv import load_dotenv
 from sagemaker.sklearn.estimator import SKLearn
 
@@ -56,6 +58,14 @@ log.info("  instance      = %s", INSTANCE_TYPE)
 log.info("  job name      = %s", JOB_NAME)
 log.info("  region        = %s", AWS_REGION)
 
+# ─── Sesión boto3/sagemaker con región explícita ───────────────────────────
+# El SDK falla con "Must setup local AWS configuration with a region..." si
+# no encuentra la región en ~/.aws/config o en AWS_DEFAULT_REGION. Inyectamos
+# la región leída del .env directamente en la sesión, así no depende del
+# entorno del usuario.
+boto_session = boto3.Session(region_name=AWS_REGION)
+sagemaker_session = sagemaker.Session(boto_session=boto_session)
+
 # ─── Estimator ─────────────────────────────────────────────────────────────
 # framework_version 1.2-1 corresponde a scikit-learn 1.2.1 — viene con
 # pandas + joblib + boto3 preinstalados. Si train.py necesita más, los
@@ -70,6 +80,7 @@ sklearn_estimator = SKLearn(
     py_version="py3",
     output_path=OUTPUT_S3_URI,
     base_job_name="aqi-rf",
+    sagemaker_session=sagemaker_session,
     hyperparameters={
         "model-bucket": MODEL_BUCKET,
         "n-estimators": 100,
