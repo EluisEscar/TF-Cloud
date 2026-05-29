@@ -488,50 +488,42 @@ with tab_about:
     st.markdown(
         """
         ### Objetivo
-        MVP de un sistema de clasificacion de calidad del aire en **Almaty,
-        Kazajistan**, basado en Machine Learning supervisado, desplegado en la
-        nube. Trabajo final del curso de **Cloud Computing** de la **USIL**.
+        Sistema de clasificación de calidad del aire **multinacional** basado
+        en Machine Learning supervisado, con pipeline de reentrenamiento en
+        la nube. Trabajo final del curso de **Cloud Computing** de la **USIL**.
 
         ### Dataset
-        - **Fuente:** [Almaty Air Quality History](https://www.kaggle.com/datasets/fichka/almaty-air-quality-history) (Kaggle)
-        - **Origen:** OpenAQ (mediciones de estaciones AirNow, Clarity, AirGradient)
-        - **Tamano:** ~545K registros - 2020-04 -> 2026-01 - 146 estaciones
+        - **Fuente:** [OpenAQ Open Data Platform](https://openaq.org/) — bucket público en AWS S3 + API REST.
+        - **Cobertura:** 10 países seleccionados por alta concentración de PM2.5
+          (Bangladesh, India, Pakistán, Nepal, Mongolia, Tailandia, Vietnam,
+          Kazajistán, Indonesia, México).
+        - **Volumen:** ~186K mediciones procesadas, ~200 estaciones, ventana móvil de 3 meses.
+        - **Actualizable:** el dataset se regenera lanzando un job de SageMaker.
 
         ### Variable objetivo
-        Clasificacion de PM2.5 (ug/m3) en 5 clases segun breakpoints EPA:
+        Clasificación de PM2.5 (µg/m³) en 5 clases según breakpoints EPA:
 
         | Clase | Rango | Etiqueta |
         |:----:|---|---|
-        | 0 | 0 - 12 | Buena |
-        | 1 | 12.1 - 35.4 | Moderada |
-        | 2 | 35.5 - 55.4 | Danina para grupos sensibles |
-        | 3 | 55.5 - 150.4 | Danina |
-        | 4 | 150.5+ | Muy danina |
-
-        ### Arquitectura
-        ```
-        Kaggle CSV
-            ->
-        EDA + limpieza (pandas en Jupyter)
-            ->
-        Random Forest (scikit-learn) -> models/rf_aqi.pkl
-            ->
-        Supabase (PostgreSQL) <-> FastAPI (Render)
-            -> Streamlit Cloud
-        ```
+        | 0 | 0 – 12 | Buena |
+        | 1 | 12.1 – 35.4 | Moderada |
+        | 2 | 35.5 – 55.4 | Dañina para grupos sensibles |
+        | 3 | 55.5 – 150.4 | Dañina |
+        | 4 | 150.5+ | Muy dañina |
 
         ### Stack
         - **Python 3.11**, pandas, scikit-learn
-        - **FastAPI + Uvicorn** (API REST, deploy en Render)
-        - **Streamlit** (frontend, deploy en Streamlit Community Cloud)
-        - **Supabase** (PostgreSQL gestionado, datos historicos)
-        - **Docker** (contenedor de la API)
+        - **AWS SageMaker** (training jobs, MLflow tracking)
+        - **AWS S3** (datasets crudos + artefactos del modelo)
+        - **AWS EC2 + Docker** (servir la API FastAPI)
+        - **Streamlit Community Cloud** (frontend)
+        - **Supabase** (PostgreSQL gestionado, datos para visualización histórica)
         """
     )
 
     info = call_model_info()
     if info:
-        st.markdown("### Modelo en produccion")
+        st.markdown("### Modelo en producción")
         c1, c2, c3 = st.columns(3)
         c1.metric("Tipo", info["model_type"])
         c2.metric("Accuracy (test)", f"{info['metrics']['accuracy_test']:.2%}")
@@ -539,14 +531,12 @@ with tab_about:
         with st.expander("Ver metadata completa"):
             st.json(info)
     else:
-        st.info(
-            f"No se pudo conectar a la API en `{API_URL}` para mostrar metadata del modelo."
-        )
+        st.info("No se pudo conectar a la API para mostrar la metadata del modelo.")
 
 # Footer
 
 st.markdown("---")
 st.caption(
-    f"API: `{API_URL}` · "
-    f"Supabase: `{'configurado' if SUPABASE_URL else 'no configurado'}`"
+    f"Backend: {'conectado' if call_model_info() else 'no disponible'} · "
+    f"Supabase: {'configurado' if SUPABASE_URL else 'no configurado'}"
 )
