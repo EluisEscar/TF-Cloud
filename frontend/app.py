@@ -161,15 +161,15 @@ def fetch_recent(limit: int = 5000) -> pd.DataFrame:
 def fetch_stations() -> pd.DataFrame:
     """Devuelve las estaciones únicas con lat/lon (para el mapa).
 
-    Supabase limita a 1000 filas por request, así que paginamos hasta
-    encontrar todas las estaciones distintas (típicamente ~200 en el
-    dataset multipaís).
+    Supabase limita a 1000 filas por request, así que paginamos con
+    .range() ordenando por id (orden estable y determinístico — sin
+    .order() las páginas pueden traer filas repetidas o saltadas).
     """
     client = get_supabase_client()
     if client is None:
         return pd.DataFrame()
     page_size = 1000
-    max_rows = 100_000  # techo de seguridad
+    max_rows = 200_000  # techo de seguridad
     rows: list[dict] = []
     try:
         for start in range(0, max_rows, page_size):
@@ -177,6 +177,7 @@ def fetch_stations() -> pd.DataFrame:
             res = (
                 client.table("air_quality")
                 .select("location_id,name,lat,lon,country_code")
+                .order("id")
                 .range(start, end)
                 .execute()
             )
