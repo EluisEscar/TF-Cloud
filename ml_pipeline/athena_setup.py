@@ -49,6 +49,13 @@ TABLE_NAME = "records"
 # en PARTITIONED BY; el resto en la definición principal.
 # Usamos OpenCSVSerde — todas las columnas llegan como STRING y casteamos
 # en las queries finales.
+#
+# locationid usa projection.type = 'injected': Athena no enumera el rango
+# (sería 2 mil millones de partitions virtuales × año × mes → revienta el
+# limit). Con injected, los valores DEBEN venir del WHERE IN (...) del query.
+# Es exactamente nuestro patrón: siempre sabemos qué location_ids queremos.
+DROP_TABLE_SQL = f"DROP TABLE IF EXISTS {GLUE_DATABASE}.{TABLE_NAME}"
+
 CREATE_TABLE_SQL = f"""
 CREATE EXTERNAL TABLE IF NOT EXISTS {GLUE_DATABASE}.{TABLE_NAME} (
   location_id INT,
@@ -78,8 +85,7 @@ TBLPROPERTIES (
   'classification'         = 'csv',
   'projection.enabled'     = 'true',
 
-  'projection.locationid.type'     = 'integer',
-  'projection.locationid.range'    = '1,10000000',
+  'projection.locationid.type' = 'injected',
 
   'projection.year.type'  = 'integer',
   'projection.year.range' = '2013,2030',
@@ -137,7 +143,9 @@ def main() -> None:
         })
         log.info("  ✅ Database creada")
 
-    # 2. Crear tabla externa (idempotente por IF NOT EXISTS)
+    # 2. Crear tabla externa. Drop + create para tolerar cambios en el
+    # schema/projection si re-corres el setup tras un fix.
+    run_athena(athena, DROP_TABLE_SQL, results_uri, "DROP TABLE IF EXISTS")
     run_athena(athena, CREATE_TABLE_SQL, results_uri, "CREATE EXTERNAL TABLE")
 
     # 3. Smoke test: query rápida sobre una estación conocida (SPARTAN Dhaka)
