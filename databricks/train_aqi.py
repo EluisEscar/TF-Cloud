@@ -118,12 +118,16 @@ print(f"Train: {X_train.shape} | Test: {X_test.shape}")
 
 # COMMAND ----------
 
-# MAGIC %md ## 3. Entrenar con tracking de MLflow
+# MAGIC %md ## 3. Entrenar
+# MAGIC
+# MAGIC > Nota: Databricks Free Edition (serverless compute) NO expone
+# MAGIC > `spark.mlflow.modelRegistryUri`, así que cualquier `mlflow.log_params`,
+# MAGIC > `mlflow.start_run`, etc. falla con `CONFIG_NOT_AVAILABLE`. Aquí
+# MAGIC > entrenamos sin MLflow tracking — el modelo se serializa y sube a
+# MAGIC > S3 igual; solo perdemos la UI de Experiments.
 
 # COMMAND ----------
 
-import mlflow
-import mlflow.sklearn
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report, f1_score
 
@@ -135,31 +139,14 @@ PARAMS = {
     "random_state": 42,
 }
 
-# Nota: en Databricks Free Edition (serverless compute) `mlflow.set_experiment`
-# con una ruta /Shared/ falla con CONFIG_NOT_AVAILABLE (el model registry no
-# está disponible en el tier gratuito). Lo dejamos comentado — MLflow usará
-# el experimento default del notebook, lo que funciona igual de bien.
-# mlflow.set_experiment("/Shared/aqi-rf-multinational")
+print("Entrenando RandomForestClassifier ...")
+rf = RandomForestClassifier(n_jobs=-1, **PARAMS)
+rf.fit(X_train, y_train)
+print("Modelo entrenado ✓")
 
-with mlflow.start_run() as run:
-    mlflow.log_params(PARAMS)
-    mlflow.log_param("data_source", "openaq-multipais")
-    mlflow.log_param("n_rows", len(df))
-    mlflow.log_param("n_features", len(feature_cols))
-    mlflow.log_param("n_countries", len(country_mapping))
-
-    rf = RandomForestClassifier(n_jobs=-1, **PARAMS)
-    rf.fit(X_train, y_train)
-
-    y_pred = rf.predict(X_test)
-    acc = accuracy_score(y_test, y_pred)
-    f1_macro = f1_score(y_test, y_pred, average="macro")
-
-    mlflow.log_metric("accuracy_test", acc)
-    mlflow.log_metric("f1_macro", f1_macro)
-    mlflow.sklearn.log_model(rf, artifact_path="model")
-
-    run_id = run.info.run_id
+y_pred = rf.predict(X_test)
+acc = accuracy_score(y_test, y_pred)
+f1_macro = f1_score(y_test, y_pred, average="macro")
 
 print(f"\naccuracy_test = {acc:.4f}")
 print(f"f1_macro      = {f1_macro:.4f}\n")
@@ -168,6 +155,9 @@ print(classification_report(
     target_names=[AQI_LABELS[i] for i in sorted(AQI_LABELS)],
     digits=4, zero_division=0,
 ))
+
+# Placeholder para que la celda de metadata siguiente no rompa
+run_id = "no-mlflow-free-edition"
 
 # COMMAND ----------
 
