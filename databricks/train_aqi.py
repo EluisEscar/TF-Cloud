@@ -1,62 +1,86 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Reentrenamiento del modelo de calidad del aire (Almaty)
+# MAGIC # Reentrenamiento del modelo de calidad del aire (multinacional)
 # MAGIC
-# MAGIC Notebook de Databricks que reentrena el `RandomForestClassifier`, registra el
-# MAGIC experimento en **MLflow** y publica el modelo en **Hugging Face Hub** para que
-# MAGIC la API en Render lo descargue al arrancar.
+# MAGIC Notebook de Databricks que reentrena el `RandomForestClassifier` sobre el
+# MAGIC dataset OpenAQ multipaís (10 países, ~1.7M filas), registra el experimento
+# MAGIC en **MLflow** y publica el modelo en **AWS S3** para que la API en EC2
+# MAGIC lo descargue al arrancar.
 # MAGIC
-# MAGIC **Flujo:** datos (Volume o Supabase) → entrenamiento → MLflow → Hugging Face Hub.
+# MAGIC **Flujo:** Parquet en Volume → entrenamiento + MLflow → S3 → API en EC2.
 # MAGIC
 # MAGIC ## Requisitos previos (una sola vez)
 # MAGIC
-# MAGIC Configura estos *secrets* en Databricks (CLI: `databricks secrets ...`) en un
-# MAGIC scope llamado `aqi`:
-# MAGIC - `aqi/hf_token`  → token de escritura de Hugging Face (Settings → Access Tokens).
-# MAGIC - `aqi/database_url` → connection string Postgres de Supabase (solo si lees de Supabase).
+# MAGIC 1. **Volume creado** en Unity Catalog y `openaq_processed.parquet` subido.
+# MAGIC 2. **Secrets** en Databricks (scope `aqi`):
+# MAGIC    - `aqi/aws_access_key_id`     → del IAM user con permiso write al model bucket
+# MAGIC    - `aqi/aws_secret_access_key`
 # MAGIC
-# MAGIC Los parámetros (repo de HF, fuente de datos) se controlan con los *widgets* de abajo.
+# MAGIC ## Cómo crear los secrets (Databricks CLI)
+# MAGIC ```bash
+# MAGIC databricks secrets create-scope aqi
+# MAGIC databricks secrets put-secret aqi aws_access_key_id
+# MAGIC databricks secrets put-secret aqi aws_secret_access_key
+# MAGIC ```
 
 # COMMAND ----------
 
-# MAGIC %pip install -q "scikit-learn>=1.6.1" "huggingface_hub>=0.27" "sqlalchemy>=2.0" "psycopg2-binary>=2.9" pandas joblib
+# MAGIC %pip install -q "scikit-learn==1.2.2" "boto3>=1.35" "pandas>=2.2" "pyarrow>=14" joblib
 # MAGIC %restart_python
 
 # COMMAND ----------
 
-# Widgets de parámetros (también los lee el Job programado de la Fase C).
-dbutils.widgets.text("hf_repo", "TU_USUARIO_HF/aqi-rf", "Repo Hugging Face (user/nombre)")
-dbutils.widgets.dropdown("data_source", "volume", ["volume", "supabase"], "Fuente de datos")
+# Widgets de parámetros
 dbutils.widgets.text(
     "volume_path",
-    "/Volumes/workspace/default/aqi/processed.csv",
-    "Ruta del CSV en el Volume (si data_source=volume)",
+    "/Volumes/workspace/default/aqi/openaq_processed.parquet",
+    "Ruta del Parquet en el Volume",
 )
+dbutils.widgets.text("model_bucket", "aqi-almaty-models-ee", "S3 bucket destino del modelo")
+dbutils.widgets.text("aws_region", "us-east-1", "AWS region")
+dbutils.widgets.text("min_accuracy", "0.65", "Umbral mínimo de accuracy para publicar")
 
-HF_REPO = dbutils.widgets.get("hf_repo")
-DATA_SOURCE = dbutils.widgets.get("data_source")
 VOLUME_PATH = dbutils.widgets.get("volume_path")
+MODEL_BUCKET = dbutils.widgets.get("model_bucket")
+AWS_REGION = dbutils.widgets.get("aws_region")
+MIN_ACCURACY = float(dbutils.widgets.get("min_accuracy"))
 
-print(f"Repo HF        : {HF_REPO}")
-print(f"Fuente de datos: {DATA_SOURCE}")
+print(f"Volume path   : {VOLUME_PATH}")
+print(f"Model bucket  : s3://{MODEL_BUCKET}")
+print(f"AWS region    : {AWS_REGION}")
+print(f"Min accuracy  : {MIN_ACCURACY}")
 
 # COMMAND ----------
 
-# MAGIC %md ## 1. Cargar datos
+# MAGIC %md ## 1. Cargar Parquet desde el Volume
 
 # COMMAND ----------
 
 import pandas as pd
 
-FEATURE_COLS = [
-    "pm10", "relativehumidity", "temperature", "um003",
-    "hour", "day", "month", "year", "dayofweek",
+df = pd.read_parquet(VOLUME_PATH)
+print(f"Filas cargadas: {len(df):,}")
+print(f"Columnas      : {list(df.columns)}")
+df["aqi_class"].value_counts().sort_index()
+
+# COMMAND ----------
+
+# MAGIC %md ## 2. Preparar features (mismo schema que SageMaker)
+
+# COMMAND ----------
+
+from sklearn.preprocessing import LabelEncoder
+
+# Candidatos numéricos (se incluyen solo los que existen en el Parquet)
+CANDIDATE_NUMERIC = [
+    "pm1", "pm10", "relativehumidity", "temperature", "um003",
+    "co", "no2", "o3", "so2", "wind_speed", "wind_direction",
     "lat", "lon",
 ]
-TARGET_COL = "aqi_class"
-MEDIAN_COLS = ["pm10", "relativehumidity", "temperature", "um003"]
+TEMPORAL_COLS = ["hour", "day", "month", "year", "dayofweek"]
+TARGET = "aqi_class"
 
-# Etiquetas EPA (mismas que src/preprocessing.py del repo).
+# Etiquetas EPA
 AQI_LABELS = {
     0: "Buena",
     1: "Moderada",
@@ -65,39 +89,32 @@ AQI_LABELS = {
     4: "Muy dañina",
 }
 
-if DATA_SOURCE == "supabase":
-    # Lee la tabla air_quality (ya contiene aqi_class) desde Supabase.
-    from sqlalchemy import create_engine
+# Label-encode country_code → country_id (categórica para el RF)
+encoder = LabelEncoder()
+df["country_id"] = encoder.fit_transform(df["country_code"].astype(str))
+country_mapping = {
+    code: int(idx)
+    for code, idx in zip(encoder.classes_, encoder.transform(encoder.classes_))
+}
+print(f"country_encoder: {country_mapping}")
 
-    database_url = dbutils.secrets.get(scope="aqi", key="database_url")
-    engine = create_engine(database_url)
-    df = pd.read_sql(
-        "SELECT pm10, relativehumidity, temperature, um003, hour, day, "
-        "month, year, dayofweek, lat, lon, aqi_class FROM air_quality",
-        engine,
-    )
-else:
-    # Lee el CSV procesado subido a un Volume de Unity Catalog.
-    df = pd.read_csv(VOLUME_PATH)
-
-print("Filas cargadas:", len(df))
-df[[TARGET_COL]].value_counts().sort_index()
-
-# COMMAND ----------
-
-# MAGIC %md ## 2. Preparar X / y y particionar
+# Selecciona las features reales (solo las que vienen en el Parquet)
+numeric_cols = [c for c in CANDIDATE_NUMERIC if c in df.columns]
+feature_cols = numeric_cols + TEMPORAL_COLS + ["country_id"]
+print(f"Features ({len(feature_cols)}): {feature_cols}")
 
 # COMMAND ----------
 
 from sklearn.model_selection import train_test_split
 
-X = df[FEATURE_COLS].astype(float)
-y = df[TARGET_COL].astype(int)
+X = df[feature_cols].astype(float)
+y = df[TARGET].astype(int)
+print(f"X: {X.shape} | y: {y.shape}")
 
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, stratify=y, random_state=42,
 )
-print("Train:", X_train.shape, "| Test:", X_test.shape)
+print(f"Train: {X_train.shape} | Test: {X_test.shape}")
 
 # COMMAND ----------
 
@@ -118,12 +135,14 @@ PARAMS = {
     "random_state": 42,
 }
 
-mlflow.set_experiment("/Shared/aqi-rf")
+mlflow.set_experiment("/Shared/aqi-rf-multinational")
 
 with mlflow.start_run() as run:
     mlflow.log_params(PARAMS)
-    mlflow.log_param("data_source", DATA_SOURCE)
+    mlflow.log_param("data_source", "openaq-multipais")
     mlflow.log_param("n_rows", len(df))
+    mlflow.log_param("n_features", len(feature_cols))
+    mlflow.log_param("n_countries", len(country_mapping))
 
     rf = RandomForestClassifier(n_jobs=-1, **PARAMS)
     rf.fit(X_train, y_train)
@@ -138,30 +157,46 @@ with mlflow.start_run() as run:
 
     run_id = run.info.run_id
 
-print(f"accuracy_test = {acc:.4f} | f1_macro = {f1_macro:.4f}")
-print(classification_report(y_test, y_pred, target_names=[AQI_LABELS[i] for i in sorted(AQI_LABELS)], digits=4))
+print(f"\naccuracy_test = {acc:.4f}")
+print(f"f1_macro      = {f1_macro:.4f}\n")
+print(classification_report(
+    y_test, y_pred,
+    target_names=[AQI_LABELS[i] for i in sorted(AQI_LABELS)],
+    digits=4, zero_division=0,
+))
 
 # COMMAND ----------
 
-# MAGIC %md ## 4. Serializar modelo + metadata (mismo formato que el repo)
+# MAGIC %md ## 4. Serializar modelo + metadata
 
 # COMMAND ----------
 
 import json
 import joblib
+import os
 
-medians = {col: float(df[col].median()) for col in MEDIAN_COLS}
+# Medianas para imputación en inferencia (lo usa la API en EC2)
+NO_IMPUTE = {"lat", "lon", "hour", "day", "month", "year", "dayofweek", "aqi_class"}
+medians = {
+    c: float(df[c].median())
+    for c in numeric_cols
+    if c not in NO_IMPUTE and df[c].notna().any()
+}
 
 metadata = {
-    "feature_names": FEATURE_COLS,
-    "target": TARGET_COL,
+    "feature_names": feature_cols,
+    "target": TARGET,
     "class_labels": {str(k): v for k, v in AQI_LABELS.items()},
     "medians": medians,
+    "country_encoder": country_mapping,
     "model_type": "RandomForestClassifier",
     "params": PARAMS,
     "metrics": {"accuracy_test": float(acc), "f1_macro": float(f1_macro)},
     "n_train": int(len(X_train)),
     "n_test": int(len(X_test)),
+    "training_source": "databricks",
+    "data_source": "openaq",
+    "countries": sorted(country_mapping.keys()),
     "mlflow_run_id": run_id,
 }
 
@@ -171,41 +206,53 @@ joblib.dump(rf, local_model)
 with open(local_meta, "w", encoding="utf-8") as f:
     json.dump(metadata, f, indent=2, ensure_ascii=False)
 
-print("Tamaño del .pkl:", round(__import__("os").path.getsize(local_model) / 1e6, 2), "MB")
+print(f"Tamaño del .pkl: {round(os.path.getsize(local_model) / 1e6, 2)} MB")
+print(f"Tamaño features.json: {round(os.path.getsize(local_meta) / 1e3, 2)} KB")
 
 # COMMAND ----------
 
-# MAGIC %md ## 5. Publicar en Hugging Face Hub
+# MAGIC %md ## 5. Publicar en S3
 # MAGIC
-# MAGIC Solo promueve el modelo si supera un umbral mínimo de accuracy (gate de calidad).
+# MAGIC Solo se promueve el modelo si supera el umbral de accuracy (gate de calidad).
+# MAGIC La API en EC2 lo descargará al reiniciarse — usa el IAM role asociado.
 
 # COMMAND ----------
 
-from huggingface_hub import HfApi
-
-MIN_ACCURACY = 0.65  # gate: no publiques un modelo peor que la línea base
+import boto3
 
 if acc < MIN_ACCURACY:
     raise ValueError(
-        f"accuracy_test={acc:.4f} < umbral {MIN_ACCURACY}. No se publica el modelo."
+        f"accuracy_test={acc:.4f} < umbral {MIN_ACCURACY}. NO se publica el modelo."
     )
 
-hf_token = dbutils.secrets.get(scope="aqi", key="hf_token")
-api = HfApi(token=hf_token)
-api.create_repo(repo_id=HF_REPO, repo_type="model", exist_ok=True)
+aws_key = dbutils.secrets.get(scope="aqi", key="aws_access_key_id")
+aws_secret = dbutils.secrets.get(scope="aqi", key="aws_secret_access_key")
 
-api.upload_file(path_or_fileobj=local_model, path_in_repo="rf_aqi.pkl", repo_id=HF_REPO)
-api.upload_file(path_or_fileobj=local_meta, path_in_repo="features.json", repo_id=HF_REPO)
+s3 = boto3.client(
+    "s3",
+    aws_access_key_id=aws_key,
+    aws_secret_access_key=aws_secret,
+    region_name=AWS_REGION,
+)
 
-print(f"Modelo publicado en https://huggingface.co/{HF_REPO}")
+s3.upload_file(local_model, MODEL_BUCKET, "rf_aqi.pkl")
+s3.upload_file(local_meta, MODEL_BUCKET, "features.json")
+
+print(f"✅ Modelo publicado en s3://{MODEL_BUCKET}/")
+print("\nPara que la EC2 sirva el modelo nuevo:")
+print("  1. SSH a la EC2 (o consola web)")
+print("  2. docker stop aqi-api && docker rm aqi-api")
+print("  3. rm -rf /tmp/aqi-model")
+print("  4. docker run -d --name aqi-api -p 8000:8000 \\")
+print("       -e S3_BUCKET=" + MODEL_BUCKET + " \\")
+print("       -e AWS_REGION=" + AWS_REGION + " \\")
+print("       --restart unless-stopped aqi-api")
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## Listo
 # MAGIC
-# MAGIC La API en Render descargará `rf_aqi.pkl` y `features.json` de este repo de HF
-# MAGIC al reiniciarse (siempre que tenga la variable de entorno `HF_MODEL_REPO`).
-# MAGIC
-# MAGIC Para forzar que Render tome el nuevo modelo: en el dashboard de Render →
-# MAGIC **Manual Deploy** → *Clear build cache & deploy*, o configura un Deploy Hook.
+# MAGIC - Modelo entrenado y registrado en **MLflow** (Experiments → `/Shared/aqi-rf-multinational`)
+# MAGIC - `.pkl` + `features.json` subidos a S3 con gate de calidad aplicado
+# MAGIC - La EC2 está listo para descargar el modelo nuevo al reiniciarse
