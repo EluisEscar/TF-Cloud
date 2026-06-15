@@ -41,10 +41,40 @@ MAX_RETRIES = 5
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("upload")
 
-# ALTER idempotente para añadir country_code a la tabla original
-ENSURE_COLUMNS_SQL = f"""
+# DDL idempotente: crea la tabla desde cero si no existe (proyecto Supabase
+# nuevo) y aplica ALTER por si el proyecto tiene una versión vieja del
+# schema sin country_code.
+ENSURE_SCHEMA_SQL = f"""
+CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+    id               BIGSERIAL    PRIMARY KEY,
+    datetime         TIMESTAMP    NOT NULL,
+    location_id      INTEGER      NOT NULL,
+    name             TEXT,
+    provider_name    TEXT,
+    lat              NUMERIC(9, 6),
+    lon              NUMERIC(9, 6),
+    pm25             NUMERIC(10, 3),
+    pm10             NUMERIC(10, 3),
+    relativehumidity NUMERIC(10, 3),
+    temperature      NUMERIC(10, 3),
+    um003            NUMERIC(12, 3),
+    hour             SMALLINT,
+    day              SMALLINT,
+    month            SMALLINT,
+    year             SMALLINT,
+    dayofweek        SMALLINT,
+    aqi_class        SMALLINT     NOT NULL,
+    aqi_label        TEXT         NOT NULL,
+    country_code     TEXT,
+    CONSTRAINT uq_air_quality_loc_dt UNIQUE (location_id, datetime)
+);
+
 ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS country_code TEXT;
-CREATE INDEX IF NOT EXISTS idx_air_quality_country ON {TABLE_NAME} (country_code);
+
+CREATE INDEX IF NOT EXISTS idx_air_quality_datetime  ON {TABLE_NAME} (datetime);
+CREATE INDEX IF NOT EXISTS idx_air_quality_aqi_class ON {TABLE_NAME} (aqi_class);
+CREATE INDEX IF NOT EXISTS idx_air_quality_location  ON {TABLE_NAME} (location_id);
+CREATE INDEX IF NOT EXISTS idx_air_quality_country   ON {TABLE_NAME} (country_code);
 """
 
 INSERT_SQL = f"""
@@ -165,12 +195,14 @@ def main() -> None:
     rows = list(df_clean.itertuples(index=False, name=None))
     total = len(rows)
 
-    # Paso inicial: ALTER + (opcional) TRUNCATE en una sola conexión efímera
-    log.info("Preparando tabla (ALTER + opcional TRUNCATE) ...")
+    # Paso inicial: CREATE TABLE IF NOT EXISTS + ALTER + (opcional) TRUNCATE
+    # en una sola conexión efímera. Esto hace el script auto-suficiente para
+    # un proyecto Supabase nuevo (sin tabla previa) o uno con schema viejo.
+    log.info("Preparando schema (CREATE + ALTER + opcional TRUNCATE) ...")
     conn = open_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(ENSURE_COLUMNS_SQL)
+            cur.execute(ENSURE_SCHEMA_SQL)
             if args.truncate:
                 log.warning("⚠️ TRUNCATE: borrando contenido de %s", TABLE_NAME)
                 cur.execute(f"TRUNCATE TABLE {TABLE_NAME} RESTART IDENTITY")
