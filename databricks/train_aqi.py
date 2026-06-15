@@ -25,7 +25,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install -q "scikit-learn==1.2.2" "boto3>=1.35" "pandas>=2.2" "pyarrow>=14" joblib
+# MAGIC %pip install -q "scikit-learn==1.2.2" "boto3>=1.35" "pandas>=2.2,<3" "pyarrow>=14" joblib
 # MAGIC %restart_python
 
 # COMMAND ----------
