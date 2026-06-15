@@ -1,12 +1,15 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic>=2.11.7,<3.0.0
-# Pineamos sklearn a 1.2.x para que coincida con el container SKLearn 1.2-1
-# de SageMaker. Si subes la versión aquí, los .pkl entrenados por SageMaker
-# no se podrán cargar (el formato del árbol cambió en sklearn 1.3).
-scikit-learn==1.2.2
-pandas>=2.2.3,<2.3
-numpy>=1.23,<2.0
+# sklearn debe matchear el runtime de Databricks Free Edition (1.6.1), que es
+# donde se entrena el modelo semanalmente. Pickles entre minor versions de
+# sklearn no son compatibles (el formato del Tree cambia).
+scikit-learn==1.6.1
+# numpy 2.x: los wheels de sklearn 1.6.1 en PyPI están compilados contra 2.x,
+# así que aunque el metadata diga >=1.19, en la práctica necesitamos 2.x para
+# evitar el ImportError _multiarray_umath.
+numpy>=2.0,<3
+pandas==2.2.3
 joblib>=1.2.0
 huggingface_hub>=0.27.0
 boto3>=1.35.0

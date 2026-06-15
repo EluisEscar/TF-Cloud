@@ -31,8 +31,26 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install -q "scikit-learn==1.2.2" "boto3>=1.35" "pandas>=2.2,<3" "pyarrow>=14" "requests>=2.31" joblib
-# MAGIC %restart_python
+# Databricks Free Edition serverless tiene sklearn, pandas, pyarrow, boto3,
+# requests y joblib preinstalados en versiones inmutables. El constraint
+# file (/databricks/.core_packages/immutable-package-constraints.txt) bloquea
+# cualquier %pip install que intente forzar versiones distintas — eso fallaba
+# en el job runner. Imprimimos las versiones para que el equipo de la API en
+# EC2 mantenga sklearn alineado (mismo major.minor) para compatibilidad de
+# pickle.
+import sklearn
+import pandas
+import boto3
+import pyarrow
+import requests
+import joblib
+
+print(f"sklearn  : {sklearn.__version__}")
+print(f"pandas   : {pandas.__version__}")
+print(f"boto3    : {boto3.__version__}")
+print(f"pyarrow  : {pyarrow.__version__}")
+print(f"requests : {requests.__version__}")
+print(f"joblib   : {joblib.__version__}")
 
 # COMMAND ----------
 
