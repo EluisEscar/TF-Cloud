@@ -21,6 +21,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -33,7 +34,9 @@ load_dotenv()
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PARQUET = PROJECT_ROOT / "data" / "openaq_processed.parquet"
 TABLE_NAME = "air_quality"
-BATCH_SIZE = 5000
+BATCH_SIZE = 1000  # más chico = menos riesgo de timeout en una sola transacción
+COMMIT_EVERY = 10  # commit cada N batches para no perder progreso si se cae la conexión
+MAX_RETRIES = 5
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("upload")
@@ -76,24 +79,18 @@ def prepare_df(parquet_path: Path) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = None
 
-    # Si pm25 no está, no podemos cargar (es el target source) — pero por
-    # construcción de prepare_data.py debería estar.
     if "pm25" not in df.columns:
         sys.exit("El Parquet no tiene la columna pm25 — no se puede subir.")
 
-    # Clip valores fuera de rango físicamente razonable. Sensores OpenAQ a
-    # veces reportan valores absurdos (10^7 µg/m³, temperaturas de 10000°C)
-    # cuando están dañados, y Postgres rechaza por overflow de precisión
-    # (NUMERIC(10,3) tope ~10^7). Limitamos a rangos físicos sensatos.
+    # Clip valores fuera de rango físicamente razonable.
     CLIPS = {
-        "pm25":             (0,    9000),   # rango EPA realista: 0-500, extremos hasta ~1500
+        "pm25":             (0,    9000),
         "pm10":             (0,    9000),
-        "pm1":              (0,    9000),   # por si la columna está
+        "pm1":              (0,    9000),
         "relativehumidity": (0,    100),
-        "temperature":      (-80,  80),     # min/max terrestre real
-        "um003":            (0,    1e9),    # particle count, precision 12 lo aguanta
+        "temperature":      (-80,  80),
+        "um003":            (0,    1e9),
     }
-    n_before = len(df)
     for col, (lo, hi) in CLIPS.items():
         if col in df.columns:
             n_out = ((df[col] < lo) | (df[col] > hi)).sum()
@@ -101,17 +98,51 @@ def prepare_df(parquet_path: Path) -> pd.DataFrame:
                 log.info("  %s: %d valores fuera de [%s, %s] → clipped", col, n_out, lo, hi)
                 df[col] = df[col].clip(lower=lo, upper=hi)
 
-    # datetime a Python datetime (psycopg2 lo serializa bien)
-    df["datetime"] = pd.to_datetime(df["datetime"], utc=True).dt.tz_convert("UTC").dt.tz_localize(None)
+    df["datetime"] = (
+        pd.to_datetime(df["datetime"], utc=True).dt.tz_convert("UTC").dt.tz_localize(None)
+    )
 
     return df[COLUMNS_ORDER]
 
 
-def get_connection() -> psycopg2.extensions.connection:
+def open_connection() -> psycopg2.extensions.connection:
+    """Abre una conexión con TCP keepalive para evitar drops del pooler."""
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
         sys.exit("ERROR: falta DATABASE_URL en .env (Supabase Connection string).")
-    return psycopg2.connect(db_url)
+    # keepalive_*: hace que el SO mande pings TCP cada 30s para que el pooler
+    # no considere la conexión inactiva y la corte.
+    conn = psycopg2.connect(
+        db_url,
+        connect_timeout=30,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
+    )
+    return conn
+
+
+def insert_batch_with_retry(rows_batch: list[tuple], attempts: int = MAX_RETRIES) -> None:
+    """Inserta un batch. Si la conexión se cae, reabre y reintenta con backoff."""
+    last_exc: Exception | None = None
+    for i in range(attempts):
+        try:
+            conn = open_connection()
+            try:
+                with conn.cursor() as cur:
+                    execute_values(cur, INSERT_SQL, rows_batch, page_size=BATCH_SIZE)
+                conn.commit()
+            finally:
+                conn.close()
+            return  # éxito
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+            last_exc = exc
+            wait = 2 ** i  # 1s, 2s, 4s, 8s, 16s
+            log.warning("Conexión caída (intento %d/%d), reintento en %ds: %s",
+                        i + 1, attempts, wait, exc)
+            time.sleep(wait)
+    raise RuntimeError(f"Falló tras {attempts} intentos: {last_exc}")
 
 
 def main() -> None:
@@ -119,41 +150,49 @@ def main() -> None:
     parser.add_argument("--parquet", type=Path, default=DEFAULT_PARQUET)
     parser.add_argument(
         "--truncate", action="store_true",
-        help="Vacía la tabla antes de insertar (borra los datos viejos de Almaty).",
+        help="Vacía la tabla antes de insertar.",
     )
     args = parser.parse_args()
 
     if not args.parquet.exists():
-        sys.exit(f"No existe el Parquet: {args.parquet}\nCorrelo primero con prepare_data.py")
+        sys.exit(f"No existe el Parquet: {args.parquet}")
 
     df = prepare_df(args.parquet)
     log.info("Después de alinear schema: %d filas listas para subir", len(df))
 
-    conn = get_connection()
+    # Reemplaza NaN/NaT por None para que Postgres reciba NULL
+    df_clean = df.where(pd.notnull(df), None)
+    rows = list(df_clean.itertuples(index=False, name=None))
+    total = len(rows)
+
+    # Paso inicial: ALTER + (opcional) TRUNCATE en una sola conexión efímera
+    log.info("Preparando tabla (ALTER + opcional TRUNCATE) ...")
+    conn = open_connection()
     try:
         with conn.cursor() as cur:
-            log.info("ALTER TABLE (idempotente) para añadir country_code ...")
             cur.execute(ENSURE_COLUMNS_SQL)
-
             if args.truncate:
                 log.warning("⚠️ TRUNCATE: borrando contenido de %s", TABLE_NAME)
                 cur.execute(f"TRUNCATE TABLE {TABLE_NAME} RESTART IDENTITY")
-
-            # Convierte a lista de tuplas para execute_values
-            # Reemplaza NaN/NaT por None para que Postgres reciba NULL
-            df_clean = df.where(pd.notnull(df), None)
-            rows = list(df_clean.itertuples(index=False, name=None))
-
-            total = len(rows)
-            for i in range(0, total, BATCH_SIZE):
-                batch = rows[i:i + BATCH_SIZE]
-                execute_values(cur, INSERT_SQL, batch, page_size=BATCH_SIZE)
-                log.info("  %d / %d insertadas", min(i + BATCH_SIZE, total), total)
-
         conn.commit()
-        log.info("✅ Upload completo. Verifica en Supabase → Table editor → air_quality")
     finally:
         conn.close()
+
+    # Inserta en batches con reconexión automática por batch.
+    # Esto significa: si la conexión cae a la mitad, perdemos solo
+    # los batches recientes — los anteriores están commiteados.
+    log.info(
+        "Insertando en batches de %d (reconexión por batch). Total: %d filas",
+        BATCH_SIZE, total,
+    )
+    for i in range(0, total, BATCH_SIZE):
+        batch = rows[i:i + BATCH_SIZE]
+        insert_batch_with_retry(batch)
+        done = min(i + BATCH_SIZE, total)
+        if (done // BATCH_SIZE) % COMMIT_EVERY == 0 or done == total:
+            log.info("  %d / %d insertadas (%.1f%%)", done, total, 100 * done / total)
+
+    log.info("✅ Upload completo. Verifica en Supabase → Table editor → air_quality")
 
 
 if __name__ == "__main__":
