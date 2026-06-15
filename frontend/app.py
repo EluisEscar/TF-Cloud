@@ -611,53 +611,188 @@ with tab_hist:
 with tab_about:
     st.subheader("Sobre el proyecto")
 
+    # ── Resumen ejecutivo ────────────────────────────────────────────────
     st.markdown(
         """
-        ### Objetivo
         Sistema de clasificación de calidad del aire **multinacional** basado
-        en Machine Learning supervisado, con pipeline de reentrenamiento en
-        la nube. Trabajo final del curso de **Cloud Computing** de la **USIL**.
-
-        ### Dataset
-        - **Fuente:** [OpenAQ Open Data Platform](https://openaq.org/) — bucket público en AWS S3 + API REST.
-        - **Cobertura:** 10 países seleccionados por alta concentración de PM2.5
-          (Bangladesh, India, Pakistán, Nepal, Mongolia, Tailandia, Vietnam,
-          Kazajistán, Indonesia, México).
-        - **Volumen:** ~186K mediciones procesadas, ~200 estaciones, ventana móvil de 3 meses.
-        - **Actualizable:** el dataset se regenera lanzando un job de SageMaker.
-
-        ### Variable objetivo
-        Clasificación de PM2.5 (µg/m³) en 5 clases según breakpoints EPA:
-
-        | Clase | Rango | Etiqueta |
-        |:----:|---|---|
-        | 0 | 0 – 12 | Buena |
-        | 1 | 12.1 – 35.4 | Moderada |
-        | 2 | 35.5 – 55.4 | Dañina para grupos sensibles |
-        | 3 | 55.5 – 150.4 | Dañina |
-        | 4 | 150.5+ | Muy dañina |
-
-        ### Stack
-        - **Python 3.11**, pandas, scikit-learn
-        - **AWS SageMaker** (training jobs, MLflow tracking)
-        - **AWS S3** (datasets crudos + artefactos del modelo)
-        - **AWS EC2 + Docker** (servir la API FastAPI)
-        - **Streamlit Community Cloud** (frontend)
-        - **Supabase** (PostgreSQL gestionado, datos para visualización histórica)
+        en Machine Learning supervisado, con pipeline de reentrenamiento
+        completamente automatizado en la nube. Trabajo final del curso de
+        **Cloud Computing** — **USIL**.
         """
     )
 
+    # ── Tarjetas de resumen ──────────────────────────────────────────────
     info = call_model_info()
     if info:
         st.markdown("### Modelo en producción")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Tipo", info["model_type"])
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Tipo", info["model_type"].replace("Classifier", ""))
         c2.metric("Accuracy (test)", f"{info['metrics']['accuracy_test']:.2%}")
-        c3.metric("Features", len(info["feature_names"]))
-        with st.expander("Ver metadata completa"):
-            st.json(info)
+        c3.metric(
+            "F1 macro",
+            f"{info['metrics'].get('f1_macro', 0):.2%}" if "f1_macro" in info.get("metrics", {}) else "—",
+        )
+        c4.metric("Países", len(info.get("countries", [])) or "—")
     else:
-        st.info("No se pudo conectar a la API para mostrar la metadata del modelo.")
+        st.info("No se pudo conectar al backend para mostrar la metadata del modelo.")
+
+    # ── Pestañas para no abrumar ─────────────────────────────────────────
+    sub_data, sub_model, sub_stack, sub_journey, sub_meta = st.tabs(
+        ["Datos", "Modelo", "Stack tecnológico", "Iteraciones del proyecto", "Metadata"]
+    )
+
+    with sub_data:
+        st.markdown(
+            """
+            #### Fuente de datos: OpenAQ
+
+            [OpenAQ](https://openaq.org) es una ONG global que agrega mediciones
+            de calidad del aire de **gobiernos, agencias ambientales y sensores
+            ciudadanos**. Sus datos están publicados como _AWS Open Data_ —
+            accesibles vía:
+
+            - **REST API** (catálogo de estaciones, metadata)
+            - **S3 bucket público** (`openaq-data-archive`) con mediciones
+              históricas en CSV particionado.
+
+            #### Países cubiertos
+
+            Lista curada por **alta concentración de PM2.5** y buena cobertura
+            de estaciones:
+
+            | Asia del Sur | Sudeste Asiático | Asia Central | Latam |
+            |---|---|---|---|
+            | 🇧🇩 Bangladesh | 🇹🇭 Tailandia | 🇰🇿 Kazajistán | 🇲🇽 México |
+            | 🇮🇳 India | 🇻🇳 Vietnam | 🇲🇳 Mongolia | |
+            | 🇵🇰 Pakistán | 🇮🇩 Indonesia | | |
+            | 🇳🇵 Nepal | | | |
+
+            #### Volumen
+
+            - **~1.7M mediciones** procesadas (ventana móvil de 12 meses).
+            - **~400 estaciones** únicas activas.
+            - Datos actualizados en cada reentrenamiento semanal.
+
+            #### Limpieza aplicada
+
+            - Filtros: requiere PM2.5 disponible; drop de columnas con >70% NaN.
+            - Imputación: mediana global para variables meteorológicas faltantes.
+            - Clipping: valores fuera de rango físico razonable (sensores rotos).
+            """
+        )
+
+    with sub_model:
+        st.markdown(
+            """
+            #### Algoritmo
+
+            **Random Forest Classifier** con `class_weight="balanced"` para
+            compensar el desbalance natural entre clases AQI.
+
+            **Hiperparámetros:**
+            - `n_estimators = 100` árboles
+            - `max_depth = 20`
+            - `min_samples_leaf = 50`
+
+            #### Variable objetivo: 5 clases EPA
+
+            | Clase | PM2.5 (µg/m³) | Etiqueta |
+            |:----:|:---:|---|
+            | 0 | 0 – 12 | 🟢 Buena |
+            | 1 | 12.1 – 35.4 | 🟡 Moderada |
+            | 2 | 35.5 – 55.4 | 🟠 Dañina para grupos sensibles |
+            | 3 | 55.5 – 150.4 | 🔴 Dañina |
+            | 4 | 150.5+ | 🟣 Muy dañina |
+
+            #### Gate de calidad
+
+            El pipeline solo publica el modelo a producción si supera un
+            umbral mínimo de accuracy (`MIN_ACCURACY = 0.70`). Esto previene
+            que un reentrenamiento con datos degradados rompa el servicio.
+
+            #### Limitaciones honestas
+
+            - El modelo **no predice** PM2.5 numérico; clasifica en bandas EPA.
+            - El accuracy varía por país: mejor en regiones con más estaciones
+              (India, Pakistán) que en las de menor cobertura (Mongolia).
+            - No usa contaminantes secundarios (O₃, NO₂) porque el >70% de
+              estaciones no los reportan.
+            """
+        )
+
+    with sub_stack:
+        st.markdown(
+            """
+            #### Capa de datos
+
+            - **OpenAQ S3** (`openaq-data-archive`) → data lake público.
+            - **AWS Glue Data Catalog** → metadata + schema externo.
+            - **AWS Athena** → query SQL serverless sobre el data lake con
+              partition projection (escanea solo lo necesario).
+            - **AWS S3** → buckets propios para data preparada y artefactos
+              del modelo.
+            - **Supabase Postgres** → caché de visualización para el dashboard.
+
+            #### Capa de ML
+
+            - **Databricks Free Edition** (serverless) → reentrenamiento
+              programado del Random Forest.
+            - **scikit-learn 1.2.2** → algoritmo + serialización con `joblib`.
+
+            #### Capa de servicio
+
+            - **AWS EC2** + **Docker** → contenedor con la API FastAPI.
+            - **AWS IAM** → roles de servicio con principio de _least privilege_.
+            - **FastAPI** + **Uvicorn** → endpoint REST `/predict` y `/model-info`.
+            - **Streamlit Community Cloud** → frontend interactivo (esta app).
+
+            #### Capa de automatización
+
+            - **Databricks Workflows** → job semanal que dispara el pipeline
+              Athena → entrenamiento → S3.
+            """
+        )
+
+    with sub_journey:
+        st.markdown(
+            """
+            El proyecto evolucionó a través de varias iteraciones, cada una
+            resolviendo limitaciones de la anterior:
+
+            ##### Fase 1 – MVP local
+            Modelo entrenado en notebook Jupyter sobre un CSV descargado de
+            Kaggle (Almaty, ~517K filas, 1 país). Bundleado dentro de un Docker
+            image y desplegado en Render.
+
+            ##### Fase 2 – Migración a AWS
+            API movida a una **EC2** con **IAM role** para acceder al modelo
+            en **S3** sin credenciales hardcodeadas. Modelo desacoplado de la
+            imagen Docker: la API descarga `rf_aqi.pkl` al iniciar.
+
+            ##### Fase 3 – Multipaís
+            Reemplazo del CSV de Almaty por **OpenAQ multinacional**. Pipeline
+            de descarga vía API + S3 paralelo (10 países, 3 meses, ~186K filas).
+            Frontend rediseñado con dropdown de país y dashboard analítico.
+
+            ##### Fase 4 – Data lake con Athena + Glue
+            Eliminado el bottleneck de descarga paralela. Tabla externa en
+            **Glue Data Catalog** apuntando al S3 público de OpenAQ. Queries
+            SQL desde **Athena** con _partition projection_ — la ventana
+            crece a 12 meses (~1.7M filas) sin penalización de tiempo.
+
+            ##### Fase 5 – Entrenamiento automatizado
+            Reentrenamiento programado en **Databricks Free Edition**. El
+            notebook es autónomo: consulta Athena, entrena, valida gate de
+            calidad y publica a S3. Sin intervención manual.
+            """
+        )
+
+    with sub_meta:
+        if info:
+            st.markdown("#### Metadata completa del modelo en producción")
+            st.json(info)
+        else:
+            st.info("Conecta el backend para ver la metadata.")
 
 # Footer
 
