@@ -34,8 +34,9 @@ load_dotenv()
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PARQUET = PROJECT_ROOT / "data" / "openaq_processed.parquet"
 TABLE_NAME = "air_quality"
-BATCH_SIZE = 1000  # más chico = menos riesgo de timeout en una sola transacción
-COMMIT_EVERY = 10  # commit cada N batches para no perder progreso si se cae la conexión
+BATCH_SIZE = 5000  # Session pooler aguanta esto sin drop; menos overhead de
+                   # reconexión que batches chicos. Reduce a 1000 si ves SSL drops.
+COMMIT_EVERY = 5   # log de progreso cada N batches
 MAX_RETRIES = 5
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
