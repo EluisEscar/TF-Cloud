@@ -56,3 +56,4 @@ logs/
 
 # Docker
 .dockerignore
+tests/results/
