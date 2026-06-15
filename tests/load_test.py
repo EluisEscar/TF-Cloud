@@ -214,7 +214,9 @@ def main() -> None:
     elif args.mode == "stress":
         print(f"\nLanzando stress test: rampa de {args.step} → {args.max_concurrent} (step={args.step}, {args.duration}s/step) ...\n")
         history = run_stress_test(api_url, args.max_concurrent, args.step, args.duration)
-        summary = {"mode": "stress", "config": vars(args), "history": history}
+        # Serializa args: convierte Path a str para que JSON no reviente
+        config = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}
+        summary = {"mode": "stress", "config": config, "history": history}
         # Punto de saturación = último que superó el threshold
         saturated_at = next(
             (h["concurrent"] for h in history if h["error_rate_pct"] / 100 > 0.05),
