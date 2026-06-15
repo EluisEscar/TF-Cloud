@@ -1,431 +1,267 @@
 # Sistema de Clasificación de Calidad del Aire — Cloud Computing (USIL)
 
-MVP end-to-end de un sistema de Machine Learning para clasificar la calidad del aire en Almaty (Kazajistán) usando PM2.5 como referencia, desplegado en la nube.
+Sistema end-to-end de Machine Learning para clasificar la calidad del aire en
+**10 países** con alta concentración de PM2.5, con pipeline de reentrenamiento
+automatizado en la nube.
 
-## Contexto académico
+Trabajo final del curso de **Cloud Computing — USIL**.
 
-- **Universidad:** USIL — Universidad San Ignacio de Loyola, Lima
-- **Curso:** Cloud Computing
-- **Dataset:** [Almaty Air Quality History](https://www.kaggle.com/datasets/fichka/almaty-air-quality-history) (Kaggle, +500K registros, 2020-2026, fuente original OpenAQ)
-- **Objetivo:** Clasificación supervisada del nivel de calidad del aire usando los breakpoints EPA para PM2.5
+---
 
-## Arquitectura
+## Arquitectura final
 
 ```
-Dataset CSV (Kaggle)
-  ↓
-EDA + limpieza local (Jupyter + pandas)
-  ↓
-Random Forest entrenado → models/rf_aqi.pkl
-  ↓
-Datos históricos limpios → Supabase (PostgreSQL)
-  ↓
-FastAPI /predict ─────────────── Streamlit (frontend)
-        │                              │
-        │                              ↓
-        │                        Consulta Supabase
-        │                        para mapas e históricos
-        ↓                              ↓
-Docker + Render               Streamlit Community Cloud
+                         ┌──────────────────────────────┐
+                         │   OpenAQ Open Data Platform  │
+                         │   s3://openaq-data-archive   │  (público, AWS Open Data)
+                         └──────────────┬───────────────┘
+                                        │ external table
+                         ┌──────────────▼───────────────┐
+                         │   AWS Glue Data Catalog      │
+                         │   openaq_aqi.records         │  (schema + partition projection)
+                         └──────────────┬───────────────┘
+                                        │ SQL queries
+                         ┌──────────────▼───────────────┐
+                         │   AWS Athena (serverless)    │
+                         └──────────────┬───────────────┘
+                                        │ resultados
+                         ┌──────────────▼───────────────┐
+                         │   Databricks Job (semanal)   │  cron 0 2 * * 0 (UTC)
+                         │   - lee Athena               │
+                         │   - entrena Random Forest    │
+                         │   - gate de calidad          │
+                         │   - publica a S3             │
+                         └──────────────┬───────────────┘
+                                        │ s3:ObjectCreated
+                         ┌──────────────▼───────────────┐
+                         │   S3: aqi-almaty-models-ee   │
+                         │   - rf_aqi.pkl               │
+                         │   - features.json            │
+                         └──────────────┬───────────────┘
+                                        │ trigger
+                         ┌──────────────▼───────────────┐
+                         │   AWS Lambda                 │
+                         │   refresh-aqi-model          │
+                         └──────────────┬───────────────┘
+                                        │ SSM SendCommand
+                         ┌──────────────▼───────────────┐
+                         │   EC2 t3.micro + Docker      │
+                         │   FastAPI (puerto 8000)      │  ← descarga modelo nuevo de S3
+                         └──────────────┬───────────────┘
+                                        │ HTTPS
+        ┌───────────────────────────────┴──────────────────────────────┐
+        │                                                              │
+┌───────▼────────────────┐                              ┌──────────────▼──────────────┐
+│  Streamlit Cloud       │                              │  Supabase Postgres          │
+│  Predicción + Dashboard│                              │  caché de datos históricos  │
+│  (3 tabs)              │                              │  (para mapa + time series)  │
+└────────────────────────┘                              └─────────────────────────────┘
 ```
 
-## Stack
+**Demo en vivo:**
+- Frontend: ver Streamlit Cloud URL
+- API Swagger: `http://<IP_EC2>:8000/docs` (HTTP, sin TLS — academic project)
 
-| Capa | Tecnología |
-|------|------------|
-| Lenguaje | Python 3.11+ |
-| ML | scikit-learn, pandas, numpy |
-| API | FastAPI + Uvicorn |
-| Frontend | Streamlit + Plotly |
-| Base de datos | Supabase (PostgreSQL gestionado) |
-| Contenedor | Docker |
-| Deploy API | Render |
-| Deploy Frontend | Streamlit Community Cloud |
-| Control de versiones | GitHub |
+---
 
-## Variable objetivo
+## Las 5 fases del proyecto
 
-Clasificación de PM2.5 (µg/m³) en 5 clases según breakpoints EPA:
+El proyecto evolucionó iterativamente. Cada fase resuelve una limitación
+de la anterior.
 
-| Clase | Rango | Etiqueta |
-|------:|-------|----------|
-| 0 | 0 – 12 | Buena |
-| 1 | 12.1 – 35.4 | Moderada |
-| 2 | 35.5 – 55.4 | Dañina para grupos sensibles |
-| 3 | 55.5 – 150.4 | Dañina |
-| 4 | 150.5+ | Muy dañina / Peligrosa |
+| Fase | Foco | Tecnologías añadidas |
+|---|---|---|
+| **1** | MVP local con CSV de Almaty | pandas, scikit-learn, Jupyter |
+| **2** | Deploy básico | FastAPI, Docker, Render, Streamlit Cloud, Supabase |
+| **3** | Migración a AWS | EC2, S3, IAM roles |
+| **4** | Multipaís + data lake | OpenAQ S3, **Athena, Glue** |
+| **5** | Automatización completa | **Databricks Jobs**, **Lambda**, **SSM** |
 
-## Estructura del proyecto
+Detalles de cada fase: ver tab "Sobre el proyecto" en la app Streamlit.
+
+---
+
+## Modelo en producción
+
+- **Algoritmo:** `RandomForestClassifier` (sklearn 1.6.1)
+- **Features (12):** PM1, PM10, humedad, temperatura, um003, lat, lon, hour,
+  day, month, year, dayofweek, country_id
+- **Target:** AQI class (0-4) según breakpoints EPA para PM2.5
+- **Dataset:** ~1.7M mediciones de 10 países OpenAQ, ventana móvil de 12 meses
+- **Accuracy (test):** ~0.84 | **F1 macro:** ~0.85
+- **Reentreno:** automático cada domingo 02:00 UTC
+
+---
+
+## Estructura del repo
 
 ```
 TF-Cloud/
-├── data/                    # CSVs (en .gitignore)
-├── notebooks/
-│   └── 01_eda.ipynb         # EDA, limpieza y entrenamiento
-├── models/
-│   └── rf_aqi.pkl           # Modelo entrenado (en .gitignore)
-├── api/
-│   ├── main.py              # FastAPI
-│   ├── requirements.txt
-│   └── Dockerfile
-├── frontend/
-│   ├── app.py               # Streamlit
+├── api/                    # FastAPI app (Docker, deploy en EC2)
+│   ├── main.py
+│   ├── Dockerfile
 │   └── requirements.txt
-├── src/
-│   ├── preprocessing.py     # Funciones de limpieza
-│   └── upload_to_supabase.py
-├── .gitignore
-├── requirements.txt         # Dependencias de desarrollo / notebooks
-└── README.md
+├── aws_lambda/             # Lambda que refresca la EC2 al subir modelo
+│   └── refresh_ec2_model.py
+├── databricks/             # Notebook autónomo para training semanal
+│   └── train_aqi.py
+├── frontend/               # App Streamlit (3 tabs)
+│   └── app.py
+├── ml_pipeline/            # Scripts ETL + training launcher
+│   ├── explore_openaq.py       # Exploración inicial
+│   ├── prepare_data.py         # ETL vía API + S3 (legacy)
+│   ├── prepare_data_athena.py  # ETL vía Athena (recomendado)
+│   ├── athena_setup.py         # Bootstrap Glue + tabla externa
+│   ├── upload_to_supabase.py   # Sincroniza Parquet → Supabase
+│   ├── train.py                # Script de SageMaker (entry point)
+│   ├── launch_training.py      # Launcher local de SageMaker
+│   └── requirements.txt
+├── tests/                  # Pruebas de rendimiento (load, stress, availability)
+│   ├── load_test.py
+│   └── README.md
+├── src/legacy/             # Código de la Fase 1 (Almaty CSV)
+├── notebooks/              # EDA y modelado original (Fase 1)
+├── data/                   # (gitignored) Parquet local
+├── models/                 # (gitignored) .pkl bundleado para fallback
+├── requirements.txt        # Dev dependencies
+├── requirements-ml.txt     # Para lanzar SageMaker desde tu PC
+└── render.yaml             # Deploy config de Render (legacy)
 ```
 
-## Setup local
+---
 
-### 1. Crear y activar entorno virtual
+## Cómo correr cada pieza
 
-```bash
-python3.11 -m venv venv
-source venv/bin/activate          # Linux / macOS
-# .\venv\Scripts\activate         # Windows PowerShell
-```
-
-### 2. Instalar dependencias de desarrollo
+### 1. Frontend local
 
 ```bash
-pip install --upgrade pip
 pip install -r requirements.txt
-```
-
-### 3. Descargar el dataset de Kaggle
-
-Necesitas tener `~/.kaggle/kaggle.json` configurado (descargable desde tu cuenta de Kaggle → Account → Create New API Token).
-
-```bash
-mkdir -p data
-kaggle datasets download -d fichka/almaty-air-quality-history -p data --unzip
-```
-
-Tras descomprimir, verás los CSVs dentro de `data/`. El notebook de la Fase 2 ajustará la ruta exacta.
-
-### 4. Registrar el kernel del venv en Jupyter (opcional)
-
-```bash
-python -m ipykernel install --user --name=air-quality-cloud --display-name "Python (air-quality-cloud)"
-```
-
-## Configurar Supabase
-
-1. Crea una cuenta gratuita en [supabase.com](https://supabase.com).
-2. **New project** → ponle un nombre (p. ej. `air-quality-almaty`), elige una contraseña segura para la DB y la región más cercana (p. ej. `us-east-1`). Guarda la contraseña.
-3. Espera ~2 min a que el proyecto se aprovisione.
-4. Toma las credenciales:
-   - **Connection string (DATABASE_URL):** Settings → Database → *Connection string* → URI. Usa el modo **Transaction pooler** (puerto 6543). Reemplaza `[YOUR-PASSWORD]` por la contraseña del paso 2.
-   - **URL y anon key:** Settings → API → *Project URL* y *anon public*.
-5. Copia `.env.example` a `.env` y rellena los valores:
-   ```bash
-   cp .env.example .env     # macOS/Linux
-   copy .env.example .env   # Windows
-   ```
-6. Crea la tabla e índices y carga los datos históricos:
-   ```bash
-   # Solo la tabla, sin insertar (para verificar conexión primero):
-   python src/upload_to_supabase.py --schema-only
-
-   # Prueba con 10K filas para validar:
-   python src/upload_to_supabase.py --truncate --limit 10000
-
-   # Carga completa (~517K filas, puede tardar varios minutos):
-   python src/upload_to_supabase.py --truncate
-   ```
-7. Verifica en Supabase Studio → Table Editor que existe la tabla `air_quality` con los datos.
-
-## API local (FastAPI)
-
-La API REST sirve predicciones del modelo entrenado.
-
-### Correr localmente sin Docker
-
-```bash
-# Desde la raíz del proyecto, con el venv activado
-pip install -r api/requirements.txt
-uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-Abre [http://localhost:8000/docs](http://localhost:8000/docs) para la UI Swagger interactiva.
-
-### Endpoints
-
-| Método | Ruta | Descripción |
-|---|---|---|
-| GET | `/` | Healthcheck |
-| GET | `/model-info` | Metadata del modelo (features, clases, métricas) |
-| POST | `/predict` | Clasifica una observación → clase + label + probabilidades |
-
-### Probar `/predict` con curl
-
-```bash
-curl -X POST http://localhost:8000/predict \
-  -H "Content-Type: application/json" \
-  -d '{"pm10":35,"relativehumidity":70,"temperature":-5,"um003":2500,"hour":12,"day":15,"month":1,"year":2025,"dayofweek":2,"lat":43.25,"lon":76.93}'
-```
-
-### Correr con Docker
-
-```bash
-# Build (desde la raíz del proyecto, NO desde api/)
-docker build -f api/Dockerfile -t aqi-api .
-
-# Run
-docker run --rm -p 8000:8000 aqi-api
-```
-
-## Frontend (Streamlit)
-
-App con 3 tabs: **Predicción en tiempo real**, **Histórico** (mapa, evolución, distribución desde Supabase) y **Sobre el proyecto**.
-
-### Correr localmente
-
-```bash
-# Asegúrate de tener la API corriendo en otra terminal (uvicorn api.main:app)
-pip install -r frontend/requirements.txt
 streamlit run frontend/app.py
 ```
 
-Se abrirá en [http://localhost:8501](http://localhost:8501).
+Requiere `.env` con `API_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`. Ver
+`.env.example`.
 
-El frontend lee la config de **dos sitios** (en este orden):
-1. `frontend/.streamlit/secrets.toml` (si existe)
-2. Variables de entorno / `.env` raíz
-
-Para desarrollo local, basta con el `.env` raíz que ya tienes (con `API_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`).
-
-Para Streamlit Community Cloud, configurarás los secrets en su UI (ver Fase 7).
-
-## Deploy a la nube
-
-Arquitectura objetivo:
-
-```
-GitHub (este repo)
-   │
-   ├─→ Render          (Web Service · Docker · api/Dockerfile)  → API pública
-   └─→ Streamlit Cloud (frontend/app.py)                        → Frontend público
-                                │
-                                ├─ llama /predict en Render
-                                └─ consulta Supabase para histórico
-```
-
-### 1. Subir el repo a GitHub
-
-Si todavía no tienes el repo en GitHub:
+### 2. API local
 
 ```bash
-# Crea un repo vacío en github.com/<tu-usuario>/TF-Cloud (sin README ni .gitignore)
-
-git remote add origin https://github.com/<tu-usuario>/TF-Cloud.git
-git branch -M main
-git push -u origin main
+pip install -r api/requirements.txt
+uvicorn api.main:app --reload
 ```
 
-Si ya tienes remoto y solo subiste una rama de trabajo, abre PR → mergea a `main`. Render y Streamlit Cloud apuntarán a `main` por defecto.
+Por defecto sirve el `.pkl` bundleado en `models/`. Para descargar de S3 al
+arrancar, define `S3_BUCKET=aqi-almaty-models-ee` y `AWS_REGION=us-east-1`.
 
-**Antes de pushear, verifica que NO subes secretos:**
+### 3. ETL + Training (manual)
 
 ```bash
-git ls-files | grep -E '\.env$|secrets\.toml$|kaggle\.json$'
-# No debe devolver nada. Si devuelve algo, sácalo del index antes del push.
+# Primero (una vez): bootstrap de Athena
+python ml_pipeline/athena_setup.py
+
+# Cada vez que quieras re-procesar datos
+python ml_pipeline/prepare_data_athena.py --months 12
+
+# Subir el Parquet a S3 para que SageMaker o Databricks lo consuma
+python ml_pipeline/prepare_data_athena.py --months 12 --upload-s3
+
+# Sincronizar Supabase con los datos nuevos (para el dashboard)
+python ml_pipeline/upload_to_supabase.py --truncate
 ```
 
-### 2. Deploy de la API en Render
+### 4. Reentrenamiento programado
 
-El `api/Dockerfile` está preparado para Render: lee `$PORT`, expone `/` como healthcheck y copia el modelo dentro de la imagen.
+El notebook `databricks/train_aqi.py` es **autónomo** — consulta Athena, entrena,
+publica a S3 sin depender de tu PC. Configura como Job semanal:
 
-**Opción A — Blueprint (recomendado, usa `render.yaml`):**
+- Schedule: `0 2 * * 0` (domingos 02:00 UTC)
+- Compute: serverless
+- Secrets en scope `aqi`: `openaq_api_key`, `aws_access_key_id`, `aws_secret_access_key`
 
-1. Entra a [dashboard.render.com](https://dashboard.render.com) → **New** → **Blueprint**.
-2. Conecta tu cuenta de GitHub y selecciona el repo.
-3. Render detectará automáticamente `render.yaml` y propondrá crear el servicio `aqi-api`.
-4. Confirma y haz **Apply**.
-
-**Opción B — Web Service manual (sin Blueprint):**
-
-1. **New** → **Web Service** → conecta el repo.
-2. Configura:
-   | Campo | Valor |
-   |---|---|
-   | Name | `aqi-api` (o el que prefieras) |
-   | Region | la más cercana (p. ej. `Oregon`) |
-   | Branch | `main` |
-   | Runtime | **Docker** |
-   | Dockerfile Path | `api/Dockerfile` |
-   | Docker Build Context Directory | `.` (raíz del repo) |
-   | Instance Type | **Free** |
-   | Health Check Path | `/` |
-3. **Create Web Service**. El primer build tarda ~5 min (instala scikit-learn).
-4. Cuando termine, copia la URL pública. Tendrá la forma:
-   ```
-   https://aqi-api-xxxx.onrender.com
-   ```
-5. Verifica que la API responde:
-   ```bash
-   curl https://aqi-api-xxxx.onrender.com/
-   # {"status":"ok","model_loaded":true}
-
-   curl https://aqi-api-xxxx.onrender.com/docs
-   # Devuelve el HTML de Swagger UI
-   ```
-
-**Nota sobre el plan Free de Render:** la instancia se duerme tras ~15 min de inactividad. La primera petición tras dormirse tarda ~30-60 s (cold start). El frontend tiene timeout de 15 s en `requests.post`, así que la primera predicción tras un periodo de inactividad puede fallar — vuelve a intentar.
-
-### 3. Deploy del frontend en Streamlit Community Cloud
-
-1. Entra a [share.streamlit.io](https://share.streamlit.io) → **Sign in with GitHub**.
-2. **New app** → **From existing repo**.
-3. Configura:
-   | Campo | Valor |
-   |---|---|
-   | Repository | `<tu-usuario>/TF-Cloud` |
-   | Branch | `main` |
-   | Main file path | `frontend/app.py` |
-   | App URL | el subdominio que prefieras (p. ej. `aqi-almaty`) |
-4. Antes de deployar, abre **Advanced settings → Secrets** y pega:
-   ```toml
-   API_URL = "https://aqi-api-xxxx.onrender.com"
-   SUPABASE_URL = "https://<PROJECT_REF>.supabase.co"
-   SUPABASE_ANON_KEY = "eyJhbGciOi..."
-   ```
-   Streamlit Cloud guarda esto encriptado y lo expone como `st.secrets[...]`. El código del frontend ya está preparado para leer de ahí (`get_setting` en `frontend/app.py`).
-5. **Deploy**. El primer build tarda ~3 min. Cuando termine, la URL final es:
-   ```
-   https://aqi-almaty.streamlit.app
-   ```
-6. Abre la app y prueba las 3 tabs:
-   - **Predicción:** debe llamar al endpoint de Render y devolver clase + probabilidades.
-   - **Histórico:** debe consultar Supabase y pintar el mapa + serie temporal.
-   - **Sobre el proyecto:** debe mostrar la metadata del modelo desde `/model-info`.
-
-### 4. (Opcional) Restringir CORS al dominio de Streamlit
-
-En `api/main.py` el CORS está abierto (`allow_origins=["*"]`) para no bloquear el MVP. Cuando tengas la URL final del frontend, cámbialo a:
-
-```python
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["https://aqi-almaty.streamlit.app"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-```
-
-Push a `main` → Render redeployará automáticamente (`autoDeploy: true` en `render.yaml`).
-
-### 5. Checklist final
-
-- [ ] La URL de Render responde `200` en `/` y muestra `/docs` en Swagger.
-- [ ] La URL de Streamlit carga las 3 tabs sin errores.
-- [ ] Una predicción de prueba en el frontend devuelve clase + probabilidades.
-- [ ] La tab "Histórico" muestra el mapa con estaciones reales (no vacío).
-- [ ] La tab "Sobre el proyecto" muestra accuracy y nº de features (vienen de `/model-info`).
-
-## Reentrenamiento en Databricks + Hugging Face (Fase 8)
-
-Evolución del pipeline: en lugar de entrenar el modelo en local y bundlearlo en la
-imagen Docker, el modelo se **reentrena en Databricks**, se versiona con **MLflow** y
-se publica en **Hugging Face Hub**. La API en Render lo **descarga al arrancar** si
-está definida la variable de entorno `HF_MODEL_REPO`.
-
-```
-Supabase / Volume
-   ↓  (Databricks notebook + MLflow)
-RandomForest reentrenado
-   ↓  (HfApi.upload_file)
-Hugging Face Hub (usuario/aqi-rf)
-   ↓  (hf_hub_download al arrancar)
-API en Render  →  Streamlit
-```
-
-> **Retrocompatibilidad:** si `HF_MODEL_REPO` no está definida, la API usa el
-> `models/rf_aqi.pkl` local bundleado (comportamiento de la Fase 5). Nada se rompe.
-
-El notebook está en `databricks/train_aqi.py`.
-
-### 1. Crear el token de Hugging Face
-
-1. Cuenta gratuita en [huggingface.co](https://huggingface.co).
-2. **Settings → Access Tokens → New token**, tipo **Write**. Cópialo.
-3. (Opcional) Crea el repo del modelo manualmente, o deja que el notebook lo cree
-   con `create_repo(..., exist_ok=True)`. Recomendado: **público** (el modelo no es
-   sensible y así la API lo descarga sin token).
-
-### 2. Crear el workspace de Databricks
-
-1. [databricks.com/learn/free-edition](https://www.databricks.com/learn/free-edition) → **Get started free** (no requiere tarjeta).
-2. Confirma el correo. El workspace usa **compute serverless** (no hay que crear cluster).
-
-### 3. Configurar los secrets de Databricks
-
-Con el [Databricks CLI](https://docs.databricks.com/dev-tools/cli/) autenticado:
+### 5. Pruebas de rendimiento
 
 ```bash
-databricks secrets create-scope aqi
-databricks secrets put-secret aqi hf_token        # pega el token Write de HF
-databricks secrets put-secret aqi database_url     # solo si entrenarás desde Supabase
+export API_URL=http://<IP_EC2>:8000
+
+# Load test
+python tests/load_test.py --mode load --concurrent 10 --duration 60
+
+# Stress test
+python tests/load_test.py --mode stress --max-concurrent 200 --step 10
+
+# Availability test
+python tests/load_test.py --mode availability --duration 600 --interval 5
 ```
 
-### 4. Subir los datos y el notebook
+Ver `tests/README.md` para detalles sobre interpretación.
 
-- **Datos:** Catalog → **+ Add → Upload files to a volume** → sube `data/processed.csv`.
-  Anota la ruta (p. ej. `/Volumes/workspace/default/aqi/processed.csv`).
-- **Notebook:** Workspace → **Import** → sube `databricks/train_aqi.py` (Databricks lo
-  reconoce como notebook por las cabeceras `# COMMAND ----------`).
+---
 
-### 5. Primera corrida manual (Fase B)
+## Pipeline automatizado completo
 
-1. Abre el notebook, conéctalo al compute serverless.
-2. En los **widgets** de arriba:
-   - `hf_repo` → `TU_USUARIO_HF/aqi-rf`
-   - `data_source` → `volume` (la primera vez) o `supabase` (datos frescos)
-   - `volume_path` → la ruta del CSV si usas `volume`
-3. **Run all**. Al terminar, verifica en `huggingface.co/TU_USUARIO_HF/aqi-rf` que están
-   `rf_aqi.pkl` y `features.json`. En Databricks → **Experiments** verás el run de MLflow.
+Una vez configurado (Fases 1-5), el sistema funciona solo:
 
-### 6. Conectar la API de Render al modelo de HF
+```
+Domingo 02:00 UTC
+    ↓
+Databricks Job arranca compute serverless
+    ↓
+Notebook: API OpenAQ + Athena + train RF
+    ↓
+Gate de calidad (accuracy_test ≥ 0.70)
+    ↓
+Sube rf_aqi.pkl + features.json a S3
+    ↓
+S3 event → Lambda invocada
+    ↓
+Lambda → SSM SendCommand sobre EC2
+    ↓
+EC2: docker restart aqi-api (con nuevo modelo)
+    ↓
+Streamlit predice con el modelo fresco
+```
 
-En Render → servicio `aqi-api` → **Environment** → añade:
+**Cero intervención manual semanal.** El sistema se mantiene actualizado solo.
 
-| Key | Value |
-|---|---|
-| `HF_MODEL_REPO` | `TU_USUARIO_HF/aqi-rf` |
-| `HF_TOKEN` | *(solo si el repo es privado)* |
+---
 
-Guarda → Render redeploya. En los logs verás `Descargando modelo desde Hugging Face: ...`.
+## Stack tecnológico
 
-### 7. Programar el reentrenamiento (Fase C)
+### Datos
+- **OpenAQ Open Data Platform** — agregador global de mediciones de aire.
+- **AWS S3** — data lake y storage de artefactos del modelo.
+- **AWS Glue Data Catalog** — metadata + schema externo.
+- **AWS Athena** — SQL serverless sobre el data lake.
+- **Supabase Postgres** — caché de visualización del frontend.
 
-1. Databricks → **Jobs & Pipelines → Create job**.
-2. Task: tipo **Notebook** → selecciona `train_aqi.py`.
-3. En **Parameters** fija `data_source=supabase` y `hf_repo=TU_USUARIO_HF/aqi-rf`
-   (para reentrenar con datos frescos de Supabase).
-4. **Schedule** → cron semanal, p. ej. `0 0 * * 0` (domingos 00:00 UTC).
-5. (Opcional) Para que Render tome el modelo nuevo automáticamente, crea un
-   **Deploy Hook** en Render y llámalo al final del job, o redeploya manualmente.
+### ML
+- **scikit-learn 1.6.1** — Random Forest + serialización joblib.
+- **Databricks Free Edition (serverless)** — reentrenamiento semanal.
 
-El notebook incluye un **gate de calidad** (`MIN_ACCURACY = 0.65`): si el modelo
-reentrenado no supera ese umbral, falla el job y **no** publica en HF, protegiendo
-al modelo en producción.
+### Servicio
+- **FastAPI + Uvicorn** — API REST.
+- **Docker** — contenedor de la API.
+- **AWS EC2 (t3.micro)** — host del Docker.
+- **AWS IAM** — roles con principio de least privilege.
+- **Streamlit Community Cloud** — frontend.
 
-## Fases del proyecto
+### Automatización
+- **Databricks Workflows** — scheduler del retraining.
+- **AWS Lambda + EventBridge** — trigger por evento de S3.
+- **AWS Systems Manager (SSM)** — ejecución remota en EC2.
 
-- [x] **Fase 1:** Setup del entorno y estructura
-- [x] **Fase 2:** EDA y limpieza del dataset
-- [x] **Fase 3:** Entrenamiento del Random Forest
-- [x] **Fase 4:** Carga de datos históricos a Supabase
-- [x] **Fase 5:** API REST con FastAPI + Docker
-- [x] **Fase 6:** Frontend con Streamlit
-- [x] **Fase 7:** Deploy en Render + Streamlit Community Cloud
-- [x] **Fase 8:** Reentrenamiento en Databricks + MLflow + Hugging Face Hub
+---
+
+## Limitaciones conocidas
+
+- **HTTP sin TLS** en la API (academic project; no apto para datos sensibles).
+- **Free Tier de AWS expira en 6 meses** ($200 de crédito).
+- **`t3.micro` satura a ~80-150 req/s** (ver pruebas en `tests/`).
+- **Modelo solo PM2.5**: no usa contaminantes secundarios (O₃, NO₂) porque >70 %
+  de estaciones no los reportan.
+- **Datos OpenAQ sin SLA**: pueden faltar mediciones recientes.
+
+---
 
 ## Autoría
 
-Trabajo final del curso de Cloud Computing — USIL.
+Estephany Camposano · Curso Cloud Computing · USIL.

@@ -57,7 +57,7 @@ PARALLEL_WORKERS = 20
 API_KEY = os.getenv("OPENAQ_API_KEY", "")
 HEADERS = {"X-API-Key": API_KEY} if API_KEY else {}
 
-# Breakpoints EPA para PM2.5 (mismos que src/preprocessing.py)
+# Breakpoints EPA para PM2.5 (5 clases AQI estándar de la EPA)
 AQI_LABELS = {
     0: "Buena",
     1: "Moderada",

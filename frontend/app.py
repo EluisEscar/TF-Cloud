@@ -1,17 +1,12 @@
-"""Frontend Streamlit del sistema de clasificación de calidad del aire en Almaty.
+"""Streamlit app: monitor multinacional de calidad del aire.
 
 Tabs:
-1. Predicción en tiempo real (llama a la API FastAPI).
-2. Visualización histórica (consulta Supabase: mapa, línea temporal,
-   distribución de clases, estadísticas resumen).
+1. Predicción       — llama a POST /predict de la API en EC2.
+2. Dashboard        — visualización histórica desde Supabase (mapa, time series, heatmap).
 3. Sobre el proyecto.
 
-Configuración:
-- API_URL: URL de la FastAPI (default http://localhost:8000).
-- SUPABASE_URL, SUPABASE_ANON_KEY: para consultar datos históricos.
-
-Las dos primeras vienen de st.secrets (deploy en Streamlit Cloud) o
-de variables de entorno (desarrollo local con .env).
+Config vía .env local o st.secrets en Streamlit Cloud:
+- API_URL, SUPABASE_URL, SUPABASE_ANON_KEY.
 """
 from __future__ import annotations
 
@@ -26,7 +21,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 st.set_page_config(
-    page_title="Calidad del aire - Almaty",
+    page_title="Calidad del aire - Multinacional",
     page_icon="AQ",
     layout="wide",
 )
