@@ -1,11 +1,9 @@
-"""FastAPI app: clasificación de calidad del aire en Almaty.
+"""FastAPI app: clasificación de calidad del aire (modelo multinacional).
 
 Endpoints:
-- GET  /              → healthcheck
-- GET  /model-info    → metadata del modelo (features, clases, métricas)
-- POST /predict       → clasifica una observación
-
-El modelo y su metadata se cargan al arrancar la app (cold start).
+- GET  /              healthcheck
+- GET  /model-info    metadata del modelo (features, clases, métricas)
+- POST /predict       clasifica una observación
 """
 from __future__ import annotations
 
@@ -23,32 +21,20 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-load_dotenv()  # carga .env del proyecto si existe (no-op en producción)
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("aqi-api")
 
-# Rutas del modelo local (bundleado en el Docker image como fallback).
 HERE = Path(__file__).resolve().parent
 MODEL_PATH = HERE.parent / "models" / "rf_aqi.pkl"
 FEATURES_JSON = HERE.parent / "models" / "features.json"
 
-# Estado global del modelo (se llena en el lifespan)
 state: dict[str, Any] = {"model": None, "meta": None}
 
 
 def resolve_model_files() -> tuple[Path, Path]:
-    """Decide de dónde sale el modelo. Precedencia:
-
-    1. ``S3_BUCKET`` definida → descarga de un bucket S3 (despliegue en AWS EC2).
-       ``AWS_REGION`` opcional (defecto ``us-east-1``). Las credenciales las
-       resuelve ``boto3`` automáticamente: IAM role en EC2, env vars o
-       ``~/.aws/credentials`` en local.
-    2. ``HF_MODEL_REPO`` definida → descarga del repo de Hugging Face
-       (formato ``usuario/aqi-rf``). ``HF_TOKEN`` solo si el repo es privado.
-    3. Sin env vars → usa los archivos bundleados en la imagen Docker
-       (comportamiento original de la Fase 5).
-    """
+    """Decide de dónde sale el modelo según las env vars (precedencia: S3 > HF > local)."""
     bucket = os.getenv("S3_BUCKET")
     if bucket:
         import boto3
@@ -81,7 +67,6 @@ def resolve_model_files() -> tuple[Path, Path]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Carga el modelo y la metadata al arrancar."""
     model_path, features_path = resolve_model_files()
     log.info("Cargando modelo desde %s ...", model_path)
     if not model_path.exists():
@@ -118,49 +103,31 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # MVP: abierto. Restringir a la URL de Streamlit en prod.
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# ─── Schemas ───────────────────────────────────────────────────────────────
-
-
 class PredictionInput(BaseModel):
-    """Entrada para /predict.
+    """Schema flexible: el endpoint usa solo las features que el modelo cargado
+    declara en ``feature_names``; lo demás se ignora o se imputa con medianas."""
 
-    Esquema **flexible**: acepta features de ambos modelos (Almaty original y
-    multinacional OpenAQ). El endpoint usa solo las que el modelo cargado
-    declare en ``feature_names``; el resto se ignoran. Lo que falta se imputa
-    con la mediana del training (vive en ``features.json``).
-    """
-
-    # ─── Partículas (depende del modelo: pm10 para el original, pm1 para el nuevo) ─
-    pm1: Optional[float] = Field(default=None, description="PM1 (µg/m³) — modelo multipaís")
-    pm10: Optional[float] = Field(default=None, description="PM10 (µg/m³) — modelo original")
-
-    # ─── Meteorología ─────────────────────────────────────────────────────
+    pm1: Optional[float] = Field(default=None, description="PM1 (µg/m³)")
+    pm10: Optional[float] = Field(default=None, description="PM10 (µg/m³) — modelo legacy")
     relativehumidity: Optional[float] = Field(default=None, description="Humedad relativa (%)")
     temperature: Optional[float] = Field(default=None, description="Temperatura (°C)")
     um003: Optional[float] = Field(default=None, description="Conteo de partículas ≥0.3µm")
-
-    # ─── Temporales (obligatorias) ────────────────────────────────────────
-    hour: int = Field(..., ge=0, le=23, description="Hora del día (0-23, UTC)")
-    day: int = Field(..., ge=1, le=31, description="Día del mes (1-31)")
-    month: int = Field(..., ge=1, le=12, description="Mes (1-12)")
-    year: int = Field(..., ge=2020, le=2030, description="Año")
-    dayofweek: int = Field(..., ge=0, le=6, description="Día de semana (0=lunes, 6=domingo)")
-
-    # ─── Geografía ────────────────────────────────────────────────────────
-    lat: float = Field(..., description="Latitud de la estación")
-    lon: float = Field(..., description="Longitud de la estación")
-
-    # ─── País (solo modelo multipaís) ─────────────────────────────────────
+    hour: int = Field(..., ge=0, le=23)
+    day: int = Field(..., ge=1, le=31)
+    month: int = Field(..., ge=1, le=12)
+    year: int = Field(..., ge=2020, le=2030)
+    dayofweek: int = Field(..., ge=0, le=6, description="0=lunes, 6=domingo")
+    lat: float
+    lon: float
     country_code: Optional[str] = Field(
-        default=None,
-        description="Código ISO del país (ej. 'IN', 'BD'). Solo usado por el modelo multipaís.",
+        default=None, description="ISO alpha-2 (ej. 'BD', 'IN'). Requerido por el modelo multipaís."
     )
 
     model_config = {
@@ -184,11 +151,9 @@ class PredictionInput(BaseModel):
 
 
 class PredictionOutput(BaseModel):
-    aqi_class: int = Field(..., description="Clase predicha (0-4)")
-    aqi_label: str = Field(..., description="Etiqueta humana de la clase")
-    probabilities: dict[str, float] = Field(
-        ..., description="Probabilidad por cada clase (label → prob)"
-    )
+    aqi_class: int
+    aqi_label: str
+    probabilities: dict[str, float]
 
 
 class HealthOutput(BaseModel):
@@ -204,29 +169,17 @@ class ModelInfoOutput(BaseModel):
     metrics: dict[str, float]
     n_train: int
     n_test: int
-    country_encoder: Optional[dict[str, int]] = Field(
-        default=None, description="Mapping ISO code → id (solo modelo multipaís)"
-    )
-    countries: Optional[list[str]] = Field(
-        default=None, description="ISO codes de los países en el entrenamiento"
-    )
-
-
-# ─── Endpoints ─────────────────────────────────────────────────────────────
+    country_encoder: Optional[dict[str, int]] = None
+    countries: Optional[list[str]] = None
 
 
 @app.get("/", response_model=HealthOutput, tags=["health"])
 def healthcheck() -> HealthOutput:
-    """Healthcheck básico. Render lo usa para verificar que la app esté viva."""
-    return HealthOutput(
-        status="ok",
-        model_loaded=state["model"] is not None,
-    )
+    return HealthOutput(status="ok", model_loaded=state["model"] is not None)
 
 
 @app.get("/model-info", response_model=ModelInfoOutput, tags=["info"])
 def model_info() -> ModelInfoOutput:
-    """Devuelve los metadatos del modelo: features esperadas, clases, métricas."""
     meta = state["meta"]
     if meta is None:
         raise HTTPException(status_code=503, detail="Modelo no cargado")
@@ -245,7 +198,7 @@ def model_info() -> ModelInfoOutput:
 
 @app.post("/predict", response_model=PredictionOutput, tags=["predict"])
 def predict(payload: PredictionInput) -> PredictionOutput:
-    """Clasifica una observación en una de las 5 clases EPA."""
+    """Clasifica una observación en una de las 5 clases EPA según breakpoints PM2.5."""
     model = state["model"]
     meta = state["meta"]
     if model is None or meta is None:
@@ -255,21 +208,18 @@ def predict(payload: PredictionInput) -> PredictionOutput:
     feature_names: list[str] = meta["feature_names"]
     raw = payload.model_dump()
 
-    # Si el modelo usa country_id (modelo multipaís), traducimos country_code → id
-    # usando el encoder guardado en features.json.
+    # Traducir country_code → country_id si el modelo lo requiere.
+    # País desconocido cae al primer ID del encoder (predicción menos precisa).
     if "country_id" in feature_names:
         encoder = meta.get("country_encoder", {})
         code = raw.get("country_code")
         if code and code in encoder:
             raw["country_id"] = encoder[code]
         else:
-            # País desconocido → usa la primera entrada del encoder como fallback.
-            # El modelo aún puede predecir, pero será menos preciso.
             raw["country_id"] = next(iter(encoder.values()), 0)
             log.warning("country_code %r no está en el encoder; usando %s", code, raw["country_id"])
 
-    # Construye la fila en el orden exacto de features que vio el entrenamiento.
-    # Lo que no esté en el payload se imputa con la mediana del training.
+    # Construye la fila en el orden exacto de feature_names; missing → mediana del training.
     row = {
         name: (raw[name] if raw.get(name) is not None else medians.get(name, 0.0))
         for name in feature_names
