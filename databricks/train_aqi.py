@@ -135,7 +135,11 @@ PARAMS = {
     "random_state": 42,
 }
 
-mlflow.set_experiment("/Shared/aqi-rf-multinational")
+# Nota: en Databricks Free Edition (serverless compute) `mlflow.set_experiment`
+# con una ruta /Shared/ falla con CONFIG_NOT_AVAILABLE (el model registry no
+# está disponible en el tier gratuito). Lo dejamos comentado — MLflow usará
+# el experimento default del notebook, lo que funciona igual de bien.
+# mlflow.set_experiment("/Shared/aqi-rf-multinational")
 
 with mlflow.start_run() as run:
     mlflow.log_params(PARAMS)
