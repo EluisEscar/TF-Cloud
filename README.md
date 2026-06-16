@@ -112,10 +112,7 @@ TF-Cloud/
 │   ├── prepare_data.py         # ETL vía API + S3 (legacy)
 │   ├── prepare_data_athena.py  # ETL vía Athena (recomendado)
 │   ├── athena_setup.py         # Bootstrap Glue + tabla externa
-│   ├── upload_to_supabase.py   # Sincroniza Parquet → Supabase
-│   ├── train.py                # Script de SageMaker (entry point)
-│   ├── launch_training.py      # Launcher local de SageMaker
-│   └── requirements.txt
+│   └── upload_to_supabase.py   # Sincroniza Parquet → Supabase
 ├── tests/                  # Pruebas de rendimiento (load, stress, availability)
 │   ├── load_test.py
 │   └── README.md
@@ -124,7 +121,6 @@ TF-Cloud/
 ├── data/                   # (gitignored) Parquet local
 ├── models/                 # (gitignored) .pkl bundleado para fallback
 ├── requirements.txt        # Dev dependencies
-├── requirements-ml.txt     # Para lanzar SageMaker desde tu PC
 └── render.yaml             # Deploy config de Render (legacy)
 ```
 
@@ -161,7 +157,7 @@ python ml_pipeline/athena_setup.py
 # Cada vez que quieras re-procesar datos
 python ml_pipeline/prepare_data_athena.py --months 12
 
-# Subir el Parquet a S3 para que SageMaker o Databricks lo consuma
+# Subir el Parquet a S3 para que Databricks lo consuma
 python ml_pipeline/prepare_data_athena.py --months 12 --upload-s3
 
 # Sincronizar Supabase con los datos nuevos (para el dashboard)

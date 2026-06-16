@@ -1,6 +1,0 @@
-# Requirements que SageMaker instala en el container ANTES de correr train.py.
-# Hay que pinar a versiones compatibles con el container sklearn 1.2-1
-# (que trae numpy 1.23.x). Sin estos pins, pyarrow>=15 fuerza numpy 2.x
-# y rompe la sklearn precompilada → ImportError: _multiarray_umath.
-numpy<2.0
-pyarrow==14.0.2

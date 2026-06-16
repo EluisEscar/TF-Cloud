@@ -1,4 +1,8 @@
-"""Prepara dataset multinacional para entrenar el RF en SageMaker.
+"""Prepara dataset multinacional para entrenar el RF (legacy: vía API + S3).
+
+Para el pipeline actual recomendado, ver `prepare_data_athena.py` que usa
+Athena + Glue (más rápido y escalable). Este script se conserva como
+alternativa cuando no quieres setup de Athena.
 
 Pipeline (corre en local; barato de iterar):
 1. Lista estaciones con PM2.5 de los 10 países curados (vía API REST).
