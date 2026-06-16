@@ -93,7 +93,7 @@ app = FastAPI(
         "Clasificación supervisada del nivel de calidad del aire en 10 países "
         "con alta concentración de PM2.5 (Bangladesh, India, Pakistán, Nepal, "
         "Mongolia, Tailandia, Vietnam, Kazajistán, Indonesia, México). "
-        "Random Forest entrenado en SageMaker sobre mediciones reales de OpenAQ, "
+        "Random Forest entrenado en Databricks sobre mediciones reales de OpenAQ, "
         "expuesto desde una EC2 en AWS. Las clases siguen los breakpoints EPA "
         "para PM2.5."
     ),

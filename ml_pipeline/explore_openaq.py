@@ -1,7 +1,7 @@
 """Exploración inicial de OpenAQ para nuestra lista curada de países.
 
-Objetivo: validar el esquema y la cobertura ANTES de escribir el job de
-SageMaker, evitando gastar créditos en entrenamientos que fallan por datos.
+Objetivo: validar el esquema y la cobertura ANTES de escribir el pipeline
+de Athena/Databricks, evitando ciclos de entrenamiento que fallan por datos.
 
 Comprueba 4 cosas:
 1. La API REST responde y nos da los country_ids correctos.
